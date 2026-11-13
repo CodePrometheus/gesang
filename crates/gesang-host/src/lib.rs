@@ -1,0 +1,11 @@
+//! Shared transport adapters for standalone and embedded application hosts.
+
+mod control;
+mod credentials;
+mod engine;
+mod jobs;
+
+pub use control::{ControlPlane, ControlPolicy, ExecutionAction};
+pub use credentials::{ControlKey, ControlToken};
+pub use engine::{EngineAdapter, EngineConnectionPolicy, EngineConnector, EngineObservation};
+pub use jobs::{JobAuthority, JobControlKey, JobPolicy};

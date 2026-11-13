@@ -1,0 +1,5 @@
+[bindings.kotlin]
+package_name = "dev.gesang.nativeclient"
+cdylib_name = "gesang_client"
+android = true
+generate_immutable_records = true

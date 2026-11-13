@@ -1,0 +1,29 @@
+[package]
+name = "gesang-core"
+description = "Embeddable kernel for durable personal cloud agent hosts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chacha20poly1305.workspace = true
+chrono.workspace = true
+gesang-api = { path = "../gesang-api" }
+gesang-plugins = { path = "../gesang-plugins" }
+getrandom.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

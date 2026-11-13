@@ -1,0 +1,21 @@
+[package]
+name = "gesang-api"
+description = "Public platform contracts for a personal cloud agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+schema = ["dep:schemars"]
+
+[dependencies]
+chrono.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

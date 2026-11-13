@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.Gesang" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:colorAccent">#B8CAFF</item>
+        <item name="android:windowBackground">#1B1B1B</item>
+    </style>
+</resources>
