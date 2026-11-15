@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE gesang_sandbox_instances\n        SET launch = $2,\n            physical_id = $3,\n            stop_requested = $4,\n            removal = $5,\n            stopper = $6,\n            updated_at = clock_timestamp()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "268ec4f661aa697942e740bf0a9f9c46402fc9066219e5d07ce82dab77d2cdbc"
+}

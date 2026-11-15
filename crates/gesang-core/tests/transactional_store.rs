@@ -540,7 +540,7 @@ async fn anchor_reconciles_prepared_commits_without_accepting_old_or_unexplained
 #[tokio::test]
 #[ignore = "requires a real isolated transactional database"]
 async fn version_pins_survive_reopening_and_reject_conflicting_content() {
-    use gesang_plugins::{PinError, PinStore, VersionPin};
+    use gesang_plugins::{PinError, PinStore, PinSubject, VersionPin};
     let store = store().await;
     let owner = store
         .bind_owner(&VerifiedIdentity {
@@ -550,7 +550,7 @@ async fn version_pins_survive_reopening_and_reject_conflicting_content() {
         .await
         .unwrap();
     let pin = VersionPin {
-        owner_id: owner.id,
+        subject: PinSubject::Owner { owner_id: owner.id },
         reference_id: Uuid::new_v4(),
         package: "package-a".into(),
         version: "release-a".into(),
@@ -561,7 +561,7 @@ async fn version_pins_survive_reopening_and_reject_conflicting_content() {
     let reopened = Store::new(store.pool().clone(), PayloadKey::new([42; 32]));
     assert_eq!(
         reopened
-            .get(owner.id, pin.reference_id, &pin.package)
+            .get(&pin.subject, pin.reference_id, &pin.package)
             .await
             .unwrap(),
         Some(pin.clone())
@@ -575,16 +575,16 @@ async fn version_pins_survive_reopening_and_reject_conflicting_content() {
         Err(PinError::Conflict { .. })
     ));
     assert_eq!(
-        reopened.list(owner.id, pin.reference_id).await.unwrap(),
+        reopened.list(&pin.subject, pin.reference_id).await.unwrap(),
         vec![pin.clone()]
     );
     reopened
-        .unpin(owner.id, pin.reference_id, &pin.package)
+        .unpin(&pin.subject, pin.reference_id, &pin.package)
         .await
         .unwrap();
     assert!(
         reopened
-            .get(owner.id, pin.reference_id, &pin.package)
+            .get(&pin.subject, pin.reference_id, &pin.package)
             .await
             .unwrap()
             .is_none()
@@ -602,7 +602,7 @@ async fn every_acknowledged_mutation_forces_sync_commit_despite_unsafe_session_d
         CREATE TRIGGER require_sync BEFORE INSERT OR UPDATE ON gesang_commands FOR EACH ROW EXECUTE FUNCTION require_sync_commit();
         CREATE TRIGGER require_sync BEFORE INSERT OR UPDATE ON gesang_wakes FOR EACH ROW EXECUTE FUNCTION require_sync_commit();
         CREATE TRIGGER require_sync BEFORE INSERT OR UPDATE ON gesang_anchors FOR EACH ROW EXECUTE FUNCTION require_sync_commit();
-        CREATE TRIGGER require_sync BEFORE INSERT OR UPDATE ON gesang_version_pins FOR EACH ROW EXECUTE FUNCTION require_sync_commit();")
+        CREATE TRIGGER require_sync BEFORE INSERT OR UPDATE ON gesang_package_pins FOR EACH ROW EXECUTE FUNCTION require_sync_commit();")
         .execute(seeded.pool()).await.unwrap();
     let pool = PgPoolOptions::new()
         .after_connect(|connection, _| {

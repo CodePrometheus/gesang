@@ -63,7 +63,7 @@ impl ConfigurationCenter {
         let mut values = serde_json::to_value(&change.values)?;
         values.sort_all_objects();
         let actor = access.audit();
-        let mut metadata = json!({"scope":scope.key(),"component":T::COMPONENT,"schemaVersion":T::SCHEMA_VERSION,
+        let mut metadata = json!({"scope":scope.key()?,"component":T::COMPONENT,"schemaVersion":T::SCHEMA_VERSION,
             "boundary":T::ADOPTION_BOUNDARY,"expectedRevision":change.expected_revision,"values":values,"rollbackOf":rollback_of,"actor":actor});
         metadata.sort_all_objects();
         let mut fingerprint = self.key.mac()?;
@@ -84,7 +84,7 @@ impl ConfigurationCenter {
         }
         let mut tx = self.store.begin().await?;
         sqlx::query("INSERT INTO gesang_configuration_streams(id,scope_key,owner_id,component) VALUES($1,$2,$3,$4) ON CONFLICT(scope_key,component) DO NOTHING")
-            .bind(Uuid::new_v4()).bind(scope.key()).bind(scope.owner()).bind(T::COMPONENT).execute(&mut *tx).await?;
+            .bind(Uuid::new_v4()).bind(scope.key()?).bind(scope.owner()).bind(T::COMPONENT).execute(&mut *tx).await?;
         let stream = stream::<T>(&mut tx, scope, true).await?;
         let stream_id: Uuid = stream.try_get("id")?;
         if let Some(row) = sqlx::query(
@@ -464,7 +464,7 @@ async fn stream<T: Configuration>(
         "SELECT * FROM gesang_configuration_streams WHERE scope_key=$1 AND component=$2 FOR SHARE"
     };
     sqlx::query(query)
-        .bind(scope.key())
+        .bind(scope.key()?)
         .bind(T::COMPONENT)
         .fetch_optional(connection)
         .await?

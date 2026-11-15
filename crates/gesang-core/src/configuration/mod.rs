@@ -6,6 +6,7 @@ mod store;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
+use gesang_plugins::{BindingScope, InstallationId};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -22,21 +23,46 @@ pub enum ConfigurationScope {
     Deployment,
     /// Settings exclusively owned by one persisted platform identity.
     Owner(Uuid),
+    /// Explicit service selection within a deployment or business connection.
+    Services(BindingScope),
+    /// One independently configured installed plugin, without a placeholder user.
+    Installation(InstallationId),
 }
 
 impl ConfigurationScope {
-    pub(super) fn key(&self) -> String {
+    pub(super) fn key(&self) -> Result<String> {
         match self {
-            Self::Deployment => "deployment".into(),
-            Self::Owner(id) => format!("owner/{id}"),
+            Self::Deployment => Ok("deployment".into()),
+            Self::Owner(id) => Ok(format!("owner/{id}")),
+            Self::Services(binding) => binding_key(*binding),
+            Self::Installation(installation) => Ok(format!(
+                "{}/install/{}",
+                binding_key(installation.binding)?,
+                installation.id
+            )),
         }
     }
 
     pub(super) fn owner(&self) -> Option<Uuid> {
         match self {
-            Self::Deployment => None,
+            Self::Deployment | Self::Services(_) | Self::Installation(_) => None,
             Self::Owner(id) => Some(*id),
         }
+    }
+}
+
+fn binding_key(binding: BindingScope) -> Result<String> {
+    match binding {
+        BindingScope::Deployment { deployment_id } => {
+            Ok(format!("services/deployment/{deployment_id}"))
+        }
+        BindingScope::Integration {
+            deployment_id,
+            integration_id,
+        } => Ok(format!(
+            "services/integration/{deployment_id}/{integration_id}"
+        )),
+        _ => Err(Error::Forbidden),
     }
 }
 

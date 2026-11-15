@@ -8,6 +8,7 @@ graph or duplicate validation rules in this directory.
 | --- | --- |
 | `cargo xtask android-setup` | `android-setup.sh` installs and verifies the native toolchain |
 | `cargo xtask android-native` | `android-native.sh` generates bindings and cross-compiles native libraries |
+| `cargo xtask test-engine` | `test-engine.py` starts the real execution fixture and runs the host protocol probe |
 
 `android-fetch.py` is a download implementation used by toolchain setup. It is not a
 second user-facing command interface. Versions and integrity metadata must come

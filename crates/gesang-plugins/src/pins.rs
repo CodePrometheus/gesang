@@ -1,8 +1,38 @@
 //! Persistent version references, independent from running service activations.
 
+use crate::BindingScope;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// The durable owner of a package reference, independent of a live service activation.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+#[non_exhaustive]
+pub enum PinSubject {
+    /// Work or configuration belonging to a real owner.
+    Owner {
+        /// Stable owner identity.
+        owner_id: Uuid,
+    },
+    /// An installed service binding, which may exist before any user.
+    Installation {
+        /// Deployment or business integration retaining the code.
+        binding: BindingScope,
+    },
+    /// A retained external resource with an independent lifecycle.
+    Resource {
+        /// Original provider's binding.
+        binding: BindingScope,
+        /// Stable resource identity, not a user or goal identity.
+        resource_id: Uuid,
+    },
+}
 
 /// An immutable package identity, including the digest verified by the trusted installer.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -16,12 +46,12 @@ pub struct PackageVersion {
     pub digest: String,
 }
 
-/// A persistent reference keeping one package version available to an owner.
+/// A persistent reference keeping one package version available to its durable subject.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VersionPin {
-    /// Owner authorizing the reference.
-    pub owner_id: Uuid,
+    /// Durable installation, owner or resource retaining this reference.
+    pub subject: PinSubject,
     /// Durable consumer identity, such as a goal or an installed configuration.
     pub reference_id: Uuid,
     /// Installed package identifier.
@@ -35,7 +65,7 @@ pub struct VersionPin {
 /// A persistent reference conflicts with a requested version, or could not be stored.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PinError {
-    /// The same owner, reference and package already select different content.
+    /// The same subject, reference and package already select different content.
     #[error("a durable reference already pins another package version")]
     Conflict {
         /// Immutable reference already present in the platform store.
@@ -57,18 +87,22 @@ pub trait PinStore: Send + Sync + std::fmt::Debug {
     /// Reads a reference without changing its selected version.
     async fn get(
         &self,
-        owner_id: Uuid,
+        subject: &PinSubject,
         reference_id: Uuid,
         package: &str,
     ) -> Result<Option<VersionPin>, PinError>;
 
     /// Lists all package references held by this durable consumer.
-    async fn list(&self, owner_id: Uuid, reference_id: Uuid) -> Result<Vec<VersionPin>, PinError>;
+    async fn list(
+        &self,
+        subject: &PinSubject,
+        reference_id: Uuid,
+    ) -> Result<Vec<VersionPin>, PinError>;
 
     /// Explicitly releases a durable reference; resource shutdown must not call this method.
     async fn unpin(
         &self,
-        owner_id: Uuid,
+        subject: &PinSubject,
         reference_id: Uuid,
         package: &str,
     ) -> Result<(), PinError>;

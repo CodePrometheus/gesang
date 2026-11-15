@@ -1,0 +1,140 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id,\n               binding AS \"binding: _\",\n               principal AS \"principal: _\",\n               interface_name, interface_version, request_id, request_digest,\n               endpoint AS \"endpoint: _\",\n               package AS \"package: _\",\n               created_at\n        FROM gesang_resource_bindings\n        WHERE binding = $1\n          AND principal = $2\n          AND interface_name = $3\n          AND interface_version = $4\n          AND request_id = $5\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "binding: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "binding"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "principal: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "principal"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "interface_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "interface_name"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "interface_version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "interface_version"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "request_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "request_digest",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "request_digest"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "endpoint: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "endpoint"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "package: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "package"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "gesang_resource_bindings",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Jsonb",
+        "Text",
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "be30f2a1157ec5571959ccfebbf98b49413781a6f9f5b4b4a457b12f7c17647d"
+}

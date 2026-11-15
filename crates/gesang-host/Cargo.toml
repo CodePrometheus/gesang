@@ -16,6 +16,8 @@ chopin-protocol.workspace = true
 chopin-job-broker.workspace = true
 gesang-api = { path = "../gesang-api" }
 gesang-core = { path = "../gesang-core" }
+gesang-plugins = { path = "../gesang-plugins" }
+gesang-services = { path = "../gesang-services" }
 hmac.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,6 +28,8 @@ tokio.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+reqwest.workspace = true
+rustls.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "fs", "net"] }
 tower.workspace = true
 

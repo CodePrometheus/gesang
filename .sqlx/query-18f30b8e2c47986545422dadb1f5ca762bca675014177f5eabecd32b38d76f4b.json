@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO gesang_package_pins (subject, reference_id, package, version, digest)\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (subject, reference_id, package)\n        DO UPDATE SET subject = EXCLUDED.subject\n        RETURNING subject AS \"subject: _\", reference_id, package, version, digest\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "subject: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_package_pins",
+            "name": "subject"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "reference_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "gesang_package_pins",
+            "name": "reference_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "package",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_package_pins",
+            "name": "package"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "version",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_package_pins",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "digest",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_package_pins",
+            "name": "digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "18f30b8e2c47986545422dadb1f5ca762bca675014177f5eabecd32b38d76f4b"
+}

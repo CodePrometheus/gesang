@@ -138,6 +138,21 @@ impl JobAuthority {
 
 #[async_trait]
 impl HostAuthority for JobAuthority {
+    async fn authorize_scope(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        caller: &Caller,
+    ) -> chopin_job_broker::Result<()> {
+        let instance = self
+            .original(tx, caller)
+            .await
+            .map_err(|error| self.failure(error))?;
+        self.store
+            .verify_writer_in(tx, &instance.runtime)
+            .await
+            .map_err(|error| self.failure(error))
+    }
+
     async fn authenticate(&self, credential: &str) -> chopin_job_broker::Result<Caller> {
         self.key.engine(credential)
     }

@@ -74,7 +74,13 @@ These paths contain implementation work; their presence does not establish compl
 
 Read the [contribution guide](CONTRIBUTING.md) and [Rust conventions](docs/rust.md) first. The repository pins its toolchain in [`rust-toolchain.toml`](rust-toolchain.toml) and shares dependency definitions in [`Cargo.toml`](Cargo.toml).
 
-The workspace currently requires the in-development `chopin-protocol` and `chopin-job-broker` Rust crates from the sibling source checkout referenced in `Cargo.toml`. Public revisions and retrieval instructions for these crates have not been provided yet, so a fresh clone is not a reproducible standalone build. The [Android development notes](apps/android/README.md) describe its tooling. Debug application and instrumentation builds have passed; this does not establish release packaging or the complete cloud workflow.
+The workspace pins `chopin-protocol` and `chopin-job-broker` to the immutable
+`0.7.0-rc1` source revision in `Cargo.toml` and `Cargo.lock`. Cargo retrieves that
+public source directly; a sibling development checkout is not required. The
+[source tag](https://github.com/CodePrometheus/chopin-ai/tree/v0.7.0-rc1) also contains
+the execution service packages. The [Android development notes](apps/android/README.md)
+describe its tooling. Debug application and instrumentation builds have passed;
+this does not establish release packaging or the complete cloud workflow.
 
 For a configured development checkout, the Rust checks are:
 
@@ -89,10 +95,18 @@ Transactional integration tests are ignored by default. Set `GESANG_TEST_DATABAS
 cargo xtask test-store
 ```
 
+Query organization, offline metadata, and schema validation are described in the
+[database guide](docs/database.md). The independent resource API and its real
+integration checks are described in the [sandbox service guide](docs/sandbox.md).
+
 This includes kernel persistence, custody, configuration, lifecycle, host control,
 and command-broker authorization and output recovery. The broker cases use explicit
 physical-worker fixtures; they do not verify operating-system containment or a
 complete cloud task.
+
+`cargo xtask test-engine` checks the real execution service and shared host bridge
+against an isolated PostgreSQL schema. Its required settings and coverage are
+documented in [verification](docs/verification.md#host-and-execution-interoperability).
 
 Native execution storage recovery has a separate integration entry point:
 

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO gesang_sandbox_instances (id, endpoint, profile, creator, launch)\n        VALUES ($1, $2, $3, $4, 'queued')\n        ON CONFLICT (id) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "132e0a22fa51e10c4b7b938d9a58047352490b0e36b013d8e80b900aeee0a3e4"
+}

@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE gesang_service_credentials\n        SET scopes = $1,\n            revision = revision + 1\n        WHERE id = $2\n          AND revision = $3\n          AND revoked_at IS NULL\n          AND expires_at > clock_timestamp()\n        RETURNING revision\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "revision",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "gesang_service_credentials",
+            "name": "revision"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4e1658b5f2182c4a47e17b755046027dc0159390d8293dd0a503cfc02ea861a5"
+}

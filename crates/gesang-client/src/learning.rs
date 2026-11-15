@@ -52,7 +52,7 @@ pub struct LearningHeld {
 /// Current upstream learning configuration.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct LearningSettingsView {
-    /// Configured weekly budget, absent when the source has no limit.
+    /// Configured weekly budget; absence does not authorize an evaluation to run.
     pub weekly_budget_usd: Option<f64>,
     /// Configured regular model reference.
     pub regular_model: Option<String>,

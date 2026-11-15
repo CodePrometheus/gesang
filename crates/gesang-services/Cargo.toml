@@ -1,0 +1,31 @@
+[package]
+name = "gesang-services"
+description = "Authorized resource services for standalone and embedded hosts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+getrandom.workspace = true
+gesang-api = { path = "../gesang-api" }
+gesang-core = { path = "../gesang-core" }
+gesang-plugins = { path = "../gesang-plugins" }
+reqwest.workspace = true
+rustls.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

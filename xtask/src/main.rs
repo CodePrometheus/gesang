@@ -1,5 +1,7 @@
 //! One cross-platform entry point for repository checks and native build steps.
 
+mod sql;
+
 use std::{
     env,
     error::Error,
@@ -30,7 +32,7 @@ fn run() -> Result<()> {
     match task.to_str() {
         Some("help" | "--help" | "-h") => {
             println!(
-                "Usage: cargo xtask <task>\n\nTasks:\n  check                Formatting, strict lint, unit tests, and API documentation\n  fmt                  Check repository formatting without changing files\n  lint                 Strict static checks for every workspace target\n  test                 Workspace tests, excluding explicitly ignored integration tests\n  test-store           Real transactional store tests; requires GESANG_TEST_DATABASE_URL\n  test-storage         Real native execution storage recovery; requires explicit integration settings\n  test-initialization  Real native first-store creation and reconciliation through shared custody\n  doc                  Check API documentation with warnings treated as errors\n  android-setup        Install the pinned official native toolchain\n  android-native       Build native libraries and generated Kotlin bindings"
+                "Usage: cargo xtask <task>\n\nTasks:\n  check                Formatting, strict lint, unit tests, and API documentation\n  fmt                  Check repository formatting without changing files\n  lint                 Strict static checks for every workspace target\n  test                 Workspace tests, excluding explicitly ignored integration tests\n  test-engine          Real service and host protocol integration; requires explicit integration settings\n  test-store           Real transactional store tests; requires GESANG_TEST_DATABASE_URL\n  test-sandbox         Real resource API and process recovery; requires explicit local runtime settings\n  prepare-sql          Generate offline query metadata from source migrations in an isolated test schema\n  check-sql            Verify query metadata against source migrations in an isolated test schema\n  test-storage         Real native execution storage recovery; requires explicit integration settings\n  test-initialization  Real native first-store creation and reconciliation through shared custody\n  doc                  Check API documentation with warnings treated as errors\n  android-setup        Install the pinned official native toolchain\n  android-native       Build native libraries and generated Kotlin bindings"
             );
             Ok(())
         }
@@ -44,6 +46,14 @@ fn run() -> Result<()> {
         Some("lint") => lint(),
         Some("test") => tests(),
         Some("doc") => documentation(),
+        Some("prepare-sql") => sql::run(sql::Action::Prepare),
+        Some("check-sql") => sql::run(sql::Action::Check),
+        Some("test-sandbox") => sandbox_tests(),
+        Some("test-engine") => {
+            let mut command = Command::new("python3");
+            command.arg("scripts/test-engine.py");
+            execute(command)
+        }
         Some("test-store") => {
             if env::var_os("GESANG_TEST_DATABASE_URL").is_none() {
                 return Err(io::Error::other(
@@ -64,6 +74,10 @@ fn run() -> Result<()> {
                 "custody",
                 "--test",
                 "lifecycle",
+                "--test",
+                "services",
+                "--test",
+                "catalog",
                 "--",
                 "--ignored",
                 "--nocapture",
@@ -79,6 +93,17 @@ fn run() -> Result<()> {
                 "jobs",
                 "--test",
                 "initialization",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ])?;
+            cargo(&[
+                "test",
+                "--locked",
+                "-p",
+                "gesang-services",
+                "--test",
+                "access",
                 "--",
                 "--ignored",
                 "--nocapture",
@@ -187,6 +212,60 @@ fn documentation() -> Result<()> {
 fn cargo(arguments: &[&str]) -> Result<()> {
     let mut command = cargo_command();
     command.args(arguments);
+    execute(command)
+}
+
+fn sandbox_tests() -> Result<()> {
+    for variable in [
+        "GESANG_TEST_DATABASE_URL",
+        "GESANG_TEST_CONTAINER_CONFIG",
+        "GESANG_TEST_ARTIFACT_DIR",
+    ] {
+        if env::var_os(variable).is_none_or(|value| value.is_empty()) {
+            return Err(
+                io::Error::other(format!("{variable} is required for real sandbox tests")).into(),
+            );
+        }
+    }
+    cargo(&[
+        "build",
+        "--locked",
+        "-p",
+        "gesang-services",
+        "--example",
+        "sandbox-driver",
+    ])?;
+    let output = cargo_command()
+        .args(["metadata", "--locked", "--format-version", "1", "--no-deps"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("could not locate the built sandbox driver").into());
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let target = metadata["target_directory"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("build target directory is missing"))?;
+    let driver = Path::new(target).join("debug/examples/sandbox-driver");
+    if !driver.is_file() {
+        return Err(io::Error::other("the sandbox tests require a native host build").into());
+    }
+    let mut command = cargo_command();
+    command.args([
+        "test",
+        "--locked",
+        "-p",
+        "gesang-services",
+        "--test",
+        "container",
+        "-p",
+        "gesang-host",
+        "--test",
+        "sandbox",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ]);
+    command.env("GESANG_TEST_SANDBOX_DRIVER", driver);
     execute(command)
 }
 

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM gesang_package_pins\n            WHERE subject = $1 AND reference_id = $2 AND package = $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e101e877ce51983a58250df154d8e81c25943d1ac51da4e4fe7d763b7dedca07"
+}

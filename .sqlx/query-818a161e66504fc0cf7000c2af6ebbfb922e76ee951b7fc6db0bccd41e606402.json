@@ -1,0 +1,124 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, endpoint AS \"endpoint: _\", profile, creator AS \"creator: _\",\n               launch, physical_id, stop_requested, removal, stopper AS \"stopper: _\"\n        FROM gesang_sandbox_instances\n        WHERE id = $1\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "endpoint: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "endpoint"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "profile",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "profile"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "creator: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "creator"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "launch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "launch"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "physical_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "physical_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "stop_requested",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "stop_requested"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "removal",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "removal"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "stopper: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "stopper"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "818a161e66504fc0cf7000c2af6ebbfb922e76ee951b7fc6db0bccd41e606402"
+}

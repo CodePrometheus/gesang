@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chopin_protocol::{
     ChordClient, ConversationState, ConversationSummary, CorrectionKind, EngineCommand,
     GoalCommand, GoalPage, GoalSnapshot, HeldChange, LoopChange, LoopSettings, LoopStanding,
-    ModelChoices, ProtocolError, TranscriptPage,
+    ModelChoices, ProtocolError, StateObserver, TranscriptPage,
 };
 use chrono::DateTime;
 use gesang_api::{ApiProblem, CommandAuthorization};
@@ -361,11 +361,9 @@ impl EngineAdapter {
         runtime: &Runtime,
         goal_id: &str,
     ) -> Result<EngineObservation> {
-        self.observe(
-            runtime,
-            "chopin.goal",
-            serde_json::json!({"goalId":goal_id}),
-        )
+        self.observe(runtime, |client| async move {
+            client.observe_goal(goal_id).await
+        })
         .await
     }
 
@@ -375,20 +373,20 @@ impl EngineAdapter {
         runtime: &Runtime,
         conversation_id: u64,
     ) -> Result<EngineObservation> {
-        self.observe(
-            runtime,
-            "chopin.conversation",
-            serde_json::json!({"conversation":conversation_id}),
-        )
+        self.observe(runtime, |client| {
+            client.observe_conversation(conversation_id)
+        })
         .await
     }
 
-    async fn observe(
+    async fn observe<F>(
         &self,
         runtime: &Runtime,
-        name: &str,
-        input: Value,
-    ) -> Result<EngineObservation> {
+        operation: impl FnOnce(ChordClient) -> F,
+    ) -> Result<EngineObservation>
+    where
+        F: Future<Output = chopin_protocol::Result<StateObserver>>,
+    {
         let open = async {
             let _admitted = self.calls.read().await;
             if !self.accepting.load(Ordering::Acquire) {
@@ -398,8 +396,7 @@ impl EngineAdapter {
             let connection = self.connection(runtime)?;
             let client = self.connector.connect(runtime).await?;
             self.store.verify_execution(runtime).await?;
-            let observer = client
-                .observe(name, input)
+            let observer = operation(client)
                 .await
                 .map_err(|_| Error::Uncertain("engine observation could not be opened".into()))?;
             let observation = EngineObservation::new(

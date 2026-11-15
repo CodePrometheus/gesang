@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::{Authority, AuthorityError, PackageVersion, PinStore, ResourceScope, VersionPin};
+use crate::{
+    Authority, AuthorityError, PackageVersion, PinStore, PinSubject, ServiceScope, VersionPin,
+};
 
 /// A service's stable name and resource lifetime within a graph.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -21,7 +23,7 @@ pub struct ServiceId {
     /// Name assigned by the trusted composition root.
     pub name: String,
     /// Ownership and lifetime of the service's resources.
-    pub scope: ResourceScope,
+    pub scope: ServiceScope,
 }
 
 /// A service identity carrying its Rust interface type.
@@ -48,7 +50,7 @@ impl<T> std::fmt::Debug for ServiceKey<T> {
 impl<T: Send + Sync + 'static> ServiceKey<T> {
     /// Declares a typed identity; registration diagnoses name/type collisions.
     #[must_use]
-    pub fn new(name: impl Into<String>, scope: ResourceScope) -> Self {
+    pub fn new(name: impl Into<String>, scope: ServiceScope) -> Self {
         Self {
             id: ServiceId {
                 name: name.into(),
@@ -81,15 +83,21 @@ pub struct Dependency {
     service_type: TypeId,
 }
 
-/// The installer-approved package and authority used by one service activation.
+impl Dependency {
+    /// Returns the exact provider identity for validation against an installed manifest.
+    #[must_use]
+    pub fn id(&self) -> &ServiceId {
+        &self.id
+    }
+}
+
+/// The installer-approved package and dependencies used by one service activation.
 #[derive(Clone, Debug)]
 pub struct ServiceSpec {
     /// Immutable package content selected by the trusted installer.
     pub package: PackageVersion,
     /// Persistent consumer reference; survives resource shutdown.
     pub pin_reference: Uuid,
-    /// Host-issued authority, with the same scope as the service key.
-    pub authority: Authority,
     /// All services the factory may resolve.
     pub dependencies: Vec<Dependency>,
 }
@@ -399,7 +407,6 @@ pub struct ServiceHandle<T> {
     generation: u64,
     value: Arc<T>,
     live: Arc<Live>,
-    authority: Authority,
 }
 
 impl<T> Clone for ServiceHandle<T> {
@@ -409,7 +416,6 @@ impl<T> Clone for ServiceHandle<T> {
             generation: self.generation,
             value: self.value.clone(),
             live: self.live.clone(),
-            authority: self.authority.clone(),
         }
     }
 }
@@ -427,21 +433,14 @@ impl<T: Send + Sync + 'static> ServiceHandle<T> {
     /// Executes one call with the caller's authority; accepted calls drain before cleanup.
     pub async fn call<R: Send>(
         &self,
+        authority: &Authority,
         operation: impl for<'a> FnOnce(&'a T, &'a Authority) -> CallFuture<'a, R> + Send,
     ) -> Result<R, GraphError> {
+        if !self.id.scope.accepts(authority) {
+            return Err(AuthorityError::ScopeExpansion.into());
+        }
         let _permit = self.live.gate.enter(&self.id)?;
-        Ok(operation(&self.value, &self.authority).await)
-    }
-
-    /// Delegates this handle without enlarging its scope or capabilities.
-    pub fn narrow(
-        &self,
-        scope: ResourceScope,
-        capabilities: impl IntoIterator<Item = gesang_api::CapabilityScope>,
-    ) -> Result<Self, AuthorityError> {
-        let mut handle = self.clone();
-        handle.authority = self.authority.narrow(scope, capabilities)?;
-        Ok(handle)
+        Ok(operation(&self.value, authority).await)
     }
 
     /// Returns this handle's immutable generation number.
@@ -451,31 +450,31 @@ impl<T: Send + Sync + 'static> ServiceHandle<T> {
     }
 }
 
-/// Factory access to declared dependencies and its own non-expanding authority.
+/// Factory access to declared dependencies and its service's resource lifetime.
 #[derive(Clone)]
 pub struct ServiceContext {
     inner: Arc<Inner>,
-    authority: Authority,
+    scope: ServiceScope,
     dependencies: BTreeMap<ServiceId, TypeId>,
 }
 
 impl std::fmt::Debug for ServiceContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceContext")
-            .field("authority", &self.authority)
+            .field("scope", &self.scope)
             .field("dependencies", &self.dependencies.keys())
             .finish()
     }
 }
 
 impl ServiceContext {
-    /// Returns the exact authority issued to this factory.
+    /// Returns construction scope; it is not permission to access any user's data.
     #[must_use]
-    pub fn authority(&self) -> &Authority {
-        &self.authority
+    pub fn scope(&self) -> &ServiceScope {
+        &self.scope
     }
 
-    /// Resolves a declared provider while preserving the consumer's authority.
+    /// Resolves a declared provider without capturing a caller; every call supplies authority.
     pub fn service<T: Send + Sync + 'static>(
         &self,
         key: &ServiceKey<T>,
@@ -487,7 +486,7 @@ impl ServiceContext {
             }
             Some(_) => {}
         }
-        lookup(&self.inner, key, &self.authority)
+        lookup(&self.inner, key)
     }
 }
 
@@ -625,13 +624,12 @@ impl Graph {
             .collect())
     }
 
-    /// Obtains a typed generation for authority issued by the trusted host.
+    /// Obtains a typed generation; every invocation separately supplies host-issued authority.
     pub fn service<T: Send + Sync + 'static>(
         &self,
         key: &ServiceKey<T>,
-        authority: &Authority,
     ) -> Result<ServiceHandle<T>, GraphError> {
-        lookup(&self.inner, key, authority)
+        lookup(&self.inner, key)
     }
 
     /// Starts registered or stopped services in dependency order, reporting each failure.
@@ -646,7 +644,7 @@ impl Graph {
     }
 
     /// Revokes selected generations, drains accepted calls and closes consumers first.
-    pub async fn release(&self, scope: ResourceScope) -> Result<ChangeReport, GraphError> {
+    pub async fn release(&self, scope: ServiceScope) -> Result<ChangeReport, GraphError> {
         let graph = self.clone();
         coordinated(async move {
             let _transition = graph.inner.transition.lock().await;
@@ -787,7 +785,7 @@ impl Graph {
             }
             let context = ServiceContext {
                 inner: self.inner.clone(),
-                authority: spec.authority,
+                scope: id.scope.clone(),
                 dependencies: spec
                     .dependencies
                     .into_iter()
@@ -919,11 +917,7 @@ async fn coordinated(
 fn lookup<T: Send + Sync + 'static>(
     inner: &Inner,
     key: &ServiceKey<T>,
-    authority: &Authority,
 ) -> Result<ServiceHandle<T>, GraphError> {
-    if !key.id.scope.contains(authority.scope()) {
-        return Err(AuthorityError::ScopeExpansion.into());
-    }
     let state = inner.state()?;
     let node = state
         .nodes
@@ -949,14 +943,10 @@ fn lookup<T: Send + Sync + 'static>(
         generation: node.generation,
         value,
         live,
-        authority: authority.clone(),
     })
 }
 
 fn check_spec(id: &ServiceId, spec: &ServiceSpec) -> Result<(), GraphError> {
-    if spec.authority.scope() != &id.scope {
-        return Err(AuthorityError::ScopeExpansion.into());
-    }
     if id.name.is_empty()
         || spec.package.package.is_empty()
         || spec.package.version.is_empty()
@@ -1002,7 +992,14 @@ fn active_definitions(state: &State) -> BTreeMap<ServiceId, Definition> {
 
 fn version_pin(id: &ServiceId, spec: &ServiceSpec) -> VersionPin {
     VersionPin {
-        owner_id: id.scope.owner_id(),
+        subject: id.scope.owner_scope().map_or(
+            PinSubject::Installation {
+                binding: id.scope.binding(),
+            },
+            |scope| PinSubject::Owner {
+                owner_id: scope.owner_id(),
+            },
+        ),
         reference_id: spec.pin_reference,
         package: spec.package.package.clone(),
         version: spec.package.version.clone(),

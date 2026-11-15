@@ -43,7 +43,7 @@ struct Connector {
 impl EngineConnector for Connector {
     async fn connect(&self, _: &Runtime) -> gesang_core::Result<ChordClient> {
         self.connections.fetch_add(1, Ordering::Relaxed);
-        ChordClient::connect_with_bearer(&self.url, &self.credential)
+        ChordClient::connect(&self.url, &self.credential)
             .await
             .map_err(|_| gesang_core::Error::Uncertain("test execution connection failed".into()))
     }
@@ -215,7 +215,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     let ExecutionResponse::Rejected(problem) = adapter.execute(&stale).await? else {
         panic!("expected a definitive stale-goal rejection");
     };
-    assert_eq!(problem.code, "stale_goal");
+    assert_eq!(problem.code, "goal_conflict");
     eprintln!("stage: observe actual goal changes");
     let mut goal_watch = adapter.observe_goal(&runtime, goal_id).await?;
     let conversation_watch = adapter

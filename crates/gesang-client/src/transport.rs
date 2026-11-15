@@ -204,10 +204,11 @@ impl Client {
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
         url.set_scheme(scheme)
             .map_err(|_| ClientError::InvalidResponse)?;
-        chopin_protocol::ChordClient::connect_with_bearer_and_connector(
+        chopin_protocol::ChordClient::connect_with(
             url.as_str(),
             token,
             chopin_protocol::TlsConnector::Rustls(self.tls.clone()),
+            chopin_protocol::ConnectionOptions::default(),
         )
         .await
         .map_err(crate::observation::protocol_error)

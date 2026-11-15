@@ -23,6 +23,14 @@ host or plugin boundaries; every new layer must justify its maintenance and runt
 cost. Handle a shared cause in its owning module instead of accumulating caller
 exceptions.
 
+## Naming
+
+Use concise, descriptive function and test names in `snake_case`. Let modules and
+types supply context instead of repeating it in every identifier. Keep a test's
+full scenario in its body or assertion context; do not encode a sentence in its
+name. Avoid obscure abbreviations. Review names for clarity at call sites as
+well as declarations; formatting and lint checks do not perform that review.
+
 ## Structure and ownership
 
 Use one workspace dependency definition for shared dependencies and inherit workspace lint settings in every crate. Keep public modules and re-exports narrow. Prefer domain types and enums over booleans, unstructured strings, or shared mutable global state.
@@ -34,6 +42,11 @@ The application kernel must not import transport requests, business database cli
 Use the pinned stable toolchain and default formatter settings. Do not maintain a separate house formatting style. Order and wrap code with the formatter instead of manually aligning it.
 
 All necessary comments and public API documentation are English. Document invariants, ownership, units, authorization, failure semantics, and non-obvious ordering. Do not narrate edits or repeat code. Every exported type, field, variant, trait, and method has a useful contract.
+
+For significant asynchronous methods, document errors, cancellation, transaction
+ownership, and what a successful return proves. Add a concise example when it makes
+correct use clearer. Keep comments about the contract and its constraints; do not
+describe which project inspired the implementation.
 
 ## Errors and effects
 

@@ -1,6 +1,7 @@
 //! Embeddable application kernel for durable personal execution hosts.
 
 mod anchor;
+mod catalog;
 mod configuration;
 mod crypto;
 mod custody;
@@ -9,9 +10,11 @@ mod host;
 mod kernel;
 mod lifecycle;
 mod pins;
+mod resources;
 mod store;
 
 pub use anchor::{Anchor, AnchorHead, PendingAnchor};
+pub use catalog::{CatalogError, CatalogResult, InstalledPlugin, PluginCatalog, ServiceSelection};
 pub use configuration::{
     AdoptionBoundary, Configuration, ConfigurationAccess, ConfigurationCenter, ConfigurationChange,
     ConfigurationKey, ConfigurationRevision, ConfigurationScope, SecretInput, SecretReference,
@@ -29,4 +32,5 @@ pub use lifecycle::{
     CompletedMigration, InstanceIntent, InstancePhase, InstancePlan, InstancePurpose,
     InstanceRecord, PreparationProgress,
 };
+pub use resources::ResourceBinding;
 pub use store::{GrantRequirement, PendingCommand, Store, WakeClaim};

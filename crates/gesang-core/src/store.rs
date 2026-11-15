@@ -64,7 +64,10 @@ pub struct WakeClaim {
 }
 
 impl Store {
-    pub(crate) async fn begin(&self) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
+    /// Starts a short host transaction with synchronous commit enforced locally.
+    /// Service adapters may join their own records to kernel authorization checks;
+    /// they must not query private kernel tables or hold the transaction across network calls.
+    pub async fn begin(&self) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET LOCAL synchronous_commit='on'")
             .execute(&mut *tx)

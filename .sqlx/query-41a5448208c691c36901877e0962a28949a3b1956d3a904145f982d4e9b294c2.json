@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO gesang_sandbox_operations (\n            resource_id, request_id, action, status, caller\n        )\n        VALUES ($1, $2, $3, 'accepted', $4)\n        ON CONFLICT (resource_id, request_id)\n        DO UPDATE SET resource_id = gesang_sandbox_operations.resource_id\n        RETURNING resource_id, request_id, action, status, problem, caller AS \"caller: _\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "resource_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_operations",
+            "name": "resource_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_operations",
+            "name": "request_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "action",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_operations",
+            "name": "action"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_operations",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "problem",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_operations",
+            "name": "problem"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "caller: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_operations",
+            "name": "caller"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "41a5448208c691c36901877e0962a28949a3b1956d3a904145f982d4e9b294c2"
+}

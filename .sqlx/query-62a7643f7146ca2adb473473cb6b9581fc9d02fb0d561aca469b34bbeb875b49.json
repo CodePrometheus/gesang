@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id FROM gesang_sandbox_instances\n        WHERE endpoint = $1 AND ($2::uuid IS NULL OR id > $2)\n          AND removal <> 'stopped'\n          AND (stop_requested OR launch IN ('queued', 'issued', 'allocated', 'starting'))\n        ORDER BY id\n        LIMIT $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "gesang_sandbox_instances",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "62a7643f7146ca2adb473473cb6b9581fc9d02fb0d561aca469b34bbeb875b49"
+}

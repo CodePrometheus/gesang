@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id,\n               binding AS \"binding: _\",\n               principal AS \"principal: _\",\n               scopes AS \"scopes: _\",\n               revision\n        FROM gesang_service_credentials\n        WHERE token_hash = $1\n          AND revoked_at IS NULL\n          AND expires_at > clock_timestamp()\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "gesang_service_credentials",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "binding: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_service_credentials",
+            "name": "binding"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "principal: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_service_credentials",
+            "name": "principal"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "scopes: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "gesang_service_credentials",
+            "name": "scopes"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "revision",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "gesang_service_credentials",
+            "name": "revision"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3baee089c3f7c702244ed59a8c966e82d902dd7e22f1aaea897a54224e1cf056"
+}

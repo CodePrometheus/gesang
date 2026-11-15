@@ -40,6 +40,9 @@ pub enum Error {
     /// Protected payload integrity, binding, or key validation failed.
     #[error("protected data could not be authenticated")]
     InvalidCiphertext,
+    /// Persisted service metadata violates its declared type or identity contract.
+    #[error("stored service metadata is invalid")]
+    InvalidMetadata,
     /// The host could not obtain cryptographically secure random bytes.
     #[error("secure randomness unavailable")]
     Randomness,
@@ -55,4 +58,7 @@ pub enum Error {
     /// A validated platform or upstream payload could not be encoded or decoded.
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// A retained service implementation conflicts with the original immutable package reference.
+    #[error(transparent)]
+    PackageReference(#[from] gesang_plugins::PinError),
 }

@@ -5,6 +5,7 @@
 //! releasing an activation never releases those references.
 
 mod graph;
+mod manifest;
 mod pins;
 mod scope;
 
@@ -13,5 +14,11 @@ pub use graph::{
     ServiceFailure, ServiceHandle, ServiceId, ServiceKey, ServiceSnapshot, ServiceSpec,
     ServiceState, Shutdown, Started,
 };
-pub use pins::{PackageVersion, PinError, PinStore, VersionPin};
-pub use scope::{Authority, AuthorityError, ResourceScope};
+pub use manifest::{
+    InstallationId, InstalledVersion, InterfaceId, ManifestError, PluginManifest, PluginSettings,
+    ServiceChoice, ServiceEndpoint, ServiceRequirement,
+};
+pub use pins::{PackageVersion, PinError, PinStore, PinSubject, VersionPin};
+pub use scope::{
+    Authority, AuthorityError, BindingScope, CallSubject, PrincipalId, ResourceScope, ServiceScope,
+};

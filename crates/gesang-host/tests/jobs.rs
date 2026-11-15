@@ -20,7 +20,8 @@ use base64::{Engine as _, prelude::BASE64_URL_SAFE_NO_PAD};
 use chopin_job_broker::{
     Action, Broker, Caller, Credential, Error as JobError, ExitStatus, GrantReference,
     HostAuthority, JobId, JobKey, Ledger, Phase, ProcessIdentity, Request, Settings, Snapshot,
-    Source, Stream, WorkerEndpoint, WorkerEvent, WorkerObservation, WorkerStart, WorkerTransport,
+    Source, Stream, WorkerEndpoint, WorkerEvent, WorkerObservation, WorkerStart, WorkerState,
+    WorkerTransport,
 };
 use chrono::TimeDelta;
 use gesang_api::{CapabilityScope, Grant, GrantPurpose, GrantSelection, PermissionMode};
@@ -70,13 +71,11 @@ struct Worker {
 }
 
 impl Worker {
-    fn observation(&self) -> WorkerObservation {
+    fn observation(&self, id: JobId) -> WorkerObservation {
         WorkerObservation {
+            id,
             worker: self.id,
-            process: None,
-            released: false,
-            drained: false,
-            uncertainty: None,
+            state: WorkerState::Accepted,
         }
     }
 }
@@ -110,23 +109,29 @@ impl WorkerTransport for Worker {
     ) -> chopin_job_broker::Result<WorkerObservation> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         *self.launch.lock().unwrap() = Some(launch.clone());
-        Ok(self.observation())
+        Ok(self.observation(launch.id))
     }
 
     async fn observe(
         &self,
         _: &WorkerEndpoint,
-        _: JobId,
-    ) -> chopin_job_broker::Result<WorkerObservation> {
-        Ok(self.observation())
+        id: JobId,
+    ) -> chopin_job_broker::Result<Option<WorkerObservation>> {
+        Ok(self
+            .launch
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|launch| launch.id == id)
+            .map(|_| self.observation(id)))
     }
 
     async fn stop(
         &self,
         _: &WorkerEndpoint,
-        _: JobId,
+        id: JobId,
     ) -> chopin_job_broker::Result<WorkerObservation> {
-        Ok(self.observation())
+        Ok(self.observation(id))
     }
 }
 
@@ -255,7 +260,7 @@ impl Fixture {
         });
         let broker = Broker::new(
             store.pool().clone(),
-            Ledger::new(JobKey::new([31; 32]).unwrap()),
+            Ledger::new(JobKey::new([31; 32])),
             authority.clone(),
             worker.clone(),
             Settings {
@@ -334,9 +339,10 @@ impl Fixture {
 
 #[tokio::test]
 #[ignore = "requires a real isolated transactional database"]
-async fn cancelling_an_unsubmitted_operation_never_starts_it_after_a_late_submission() {
+async fn cancelled_before_submit() {
     let f = Fixture::new().await;
     let caller = f.caller(&f.runtime).await;
+    assert!(!f.broker.has_pending(&caller).await.unwrap());
     let operation = Uuid::new_v4();
     let mut request = f.request();
     request.grant.id = Uuid::new_v4();
@@ -352,6 +358,7 @@ async fn cancelling_an_unsubmitted_operation_never_starts_it_after_a_late_submis
     assert_eq!(late, cancelled);
     assert_eq!(f.worker.starts.load(Ordering::SeqCst), 0);
     assert!(f.worker.lookups.lock().unwrap().is_empty());
+    assert!(!f.broker.has_pending(&caller).await.unwrap());
     request.argv.push("different".into());
     assert!(matches!(
         f.broker.cancel(&caller, operation, &request).await,
@@ -367,7 +374,7 @@ async fn cancelling_an_unsubmitted_operation_never_starts_it_after_a_late_submis
 
 #[tokio::test]
 #[ignore = "requires a real isolated transactional database"]
-async fn revoked_commands_remain_observable_and_stoppable_without_new_release_or_replay() {
+async fn revoked_authority() {
     let f = Fixture::new().await;
     let caller = f.caller(&f.runtime).await;
     let request = f.request();
@@ -517,7 +524,7 @@ async fn revoked_commands_remain_observable_and_stoppable_without_new_release_or
 
 #[tokio::test]
 #[ignore = "requires a real isolated transactional database"]
-async fn replacement_runtime_reads_old_output_and_stops_only_the_original_worker() {
+async fn replacement_runtime() {
     let f = Fixture::new().await;
     let old = f.caller(&f.runtime).await;
     let request = f.request();
@@ -559,6 +566,10 @@ async fn replacement_runtime_reads_old_output_and_stops_only_the_original_worker
         f.broker.get(&old, operation).await,
         Err(JobError::Forbidden)
     ));
+    assert!(matches!(
+        f.broker.has_pending(&old).await,
+        Err(JobError::Forbidden)
+    ));
     f.broker
         .worker_event(&callback, WorkerEvent::Read)
         .await
@@ -571,6 +582,7 @@ async fn replacement_runtime_reads_old_output_and_stops_only_the_original_worker
     let current = f.caller(&replacement).await;
     assert_ne!(current.domain, request.domain);
     f.broker.get(&current, operation).await.unwrap();
+    assert!(f.broker.has_pending(&current).await.unwrap());
     let resumed = f
         .broker
         .output(
@@ -638,7 +650,7 @@ async fn replacement_runtime_reads_old_output_and_stops_only_the_original_worker
 
 #[tokio::test]
 #[ignore = "requires a real isolated transactional database"]
-async fn private_http_routes_preserve_credential_purpose_and_disable_response_storage() {
+async fn private_routes() {
     let f = Fixture::new().await;
     let request = f.request();
     let credential = f.key.issue(&f.runtime).unwrap();
@@ -726,7 +738,7 @@ async fn private_http_routes_preserve_credential_purpose_and_disable_response_st
 
 #[tokio::test]
 #[ignore = "requires a real isolated transactional database"]
-async fn purpose_and_actual_policy_remain_mandatory_with_full_access() {
+async fn required_policy() {
     let f = Fixture::new().await;
     let caller = f.caller(&f.runtime).await;
     let mut request = f.request();

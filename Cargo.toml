@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gesang-api", "crates/gesang-core", "crates/gesang-plugins", "crates/gesang-client", "crates/gesang-host", "xtask"]
+members = ["crates/gesang-api", "crates/gesang-core", "crates/gesang-plugins", "crates/gesang-client", "crates/gesang-host", "crates/gesang-services", "xtask"]
 resolver = "3"
 
 [workspace.package]
@@ -11,15 +11,16 @@ repository = "https://github.com/CodePrometheus/gesang"
 
 [workspace.dependencies]
 async-trait = "0.1.92"
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "original-uri"] }
 base64 = "0.23.1"
-chopin-protocol = { path = "../chopin-ai-gesang-engine/crates/protocol" }
-chopin-job-broker = { path = "../chopin-ai-gesang-engine/crates/job-broker", features = ["transport"] }
+chopin-protocol = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "0003c4f24957fc040aaa56f247828bc2e4420024", version = "=0.7.0-rc1" }
+chopin-job-broker = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "0003c4f24957fc040aaa56f247828bc2e4420024", version = "=0.7.0-rc1", features = ["transport"] }
 chacha20poly1305 = "0.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }
 getrandom = "0.4.3"
 hmac = "0.13.0"
 hkdf = "0.13.0"
+jsonschema = { version = "0.61.2", default-features = false, features = ["idna"] }
 serde = { version = "1.0.229", features = ["derive"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "json", "form", "query"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
@@ -31,7 +32,7 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
 tower = { version = "0.5.3", features = ["util"] }
 uniffi = { version = "0.32.2", features = ["tokio"] }
-uuid = { version = "1.29.2", features = ["v4", "serde"] }
+uuid = { version = "1.29.2", features = ["v4", "v5", "serde"] }
 webpki-roots = "1.0.12"
 zeroize = { version = "1.9.1", features = ["derive"] }
 

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO gesang_service_credentials (\n            id, token_hash, binding, principal, scopes, expires_at\n        )\n        SELECT $1, $2, $3, $4, $5, $6\n        WHERE $6 > clock_timestamp()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0172b9df0a996dc310949e76c1c0595a7a2665efad8b24f38b07a80a4e9c9c6b"
+}

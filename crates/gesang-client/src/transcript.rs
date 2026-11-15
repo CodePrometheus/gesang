@@ -178,6 +178,7 @@ pub struct TranscriptPageView {
 
 impl From<TranscriptEntry> for TranscriptEntryView {
     fn from(entry: TranscriptEntry) -> Self {
+        let internal = entry.kind == "chopin.goal-control";
         Self {
             entry_id: entry.id,
             conversation_id: entry.conversation_id,
@@ -186,7 +187,13 @@ impl From<TranscriptEntry> for TranscriptEntryView {
                 .model
                 .unwrap_or_default()
                 .iter()
-                .map(project_message)
+                .map(|message| {
+                    let mut view = project_message(message);
+                    if internal {
+                        view.role = MessageRole::Activity;
+                    }
+                    view
+                })
                 .collect(),
             details: entry.data.as_ref().map(format_value),
         }
