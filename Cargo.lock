@@ -384,8 +384,8 @@ dependencies = [
 
 [[package]]
 name = "chopin-job-broker"
-version = "0.7.0-rc1"
-source = "git+https://github.com/CodePrometheus/chopin-ai.git?rev=0003c4f24957fc040aaa56f247828bc2e4420024#0003c4f24957fc040aaa56f247828bc2e4420024"
+version = "0.7.0-rc2"
+source = "git+https://github.com/CodePrometheus/chopin-ai.git?rev=91251b63ed9beb2842b0d8bdaa7a07b792401902#91251b63ed9beb2842b0d8bdaa7a07b792401902"
 dependencies = [
  "async-trait",
  "axum",
@@ -406,8 +406,8 @@ dependencies = [
 
 [[package]]
 name = "chopin-protocol"
-version = "0.7.0-rc1"
-source = "git+https://github.com/CodePrometheus/chopin-ai.git?rev=0003c4f24957fc040aaa56f247828bc2e4420024#0003c4f24957fc040aaa56f247828bc2e4420024"
+version = "0.7.0-rc2"
+source = "git+https://github.com/CodePrometheus/chopin-ai.git?rev=91251b63ed9beb2842b0d8bdaa7a07b792401902#91251b63ed9beb2842b0d8bdaa7a07b792401902"
 dependencies = [
  "flate2",
  "futures-util",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "gesang-api"
-version = "0.1.0"
+version = "0.1.0-rc1"
 dependencies = [
  "chrono",
  "schemars",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "gesang-client"
-version = "0.1.0"
+version = "0.1.0-rc1"
 dependencies = [
  "base64 0.23.1",
  "chopin-protocol",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "gesang-core"
-version = "0.1.0"
+version = "0.1.0-rc1"
 dependencies = [
  "async-trait",
  "chacha20poly1305",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "gesang-host"
-version = "0.1.0"
+version = "0.1.0-rc1"
 dependencies = [
  "async-trait",
  "axum",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "gesang-plugins"
-version = "0.1.0"
+version = "0.1.0-rc1"
 dependencies = [
  "async-trait",
  "gesang-api",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "gesang-services"
-version = "0.1.0"
+version = "0.1.0-rc1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3552,7 +3552,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.0-rc1"
 dependencies = [
  "serde_json",
  "sqlx",

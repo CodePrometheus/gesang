@@ -13,9 +13,13 @@ gesang is being built for work that continues after you leave the conversation. 
 
 ## Development status
 
-**Pre-release: implementation is in progress.** The project is not yet a runnable or production-ready distribution. There is no installable Android release or deployable standalone service yet. Passing individual checks does not establish the complete recovery, isolation, or mobile release guarantees.
+**`v0.1.0-rc1` is the first embeddable Rust release candidate.** It provides the
+kernel, platform contracts, and host adapters. Pin the release tag in a host's
+Cargo manifest and follow the [embedding guide](docs/embedding.md). Standalone
+server and Android distributions remain in development.
 
-See [architecture](docs/architecture.md) for ownership boundaries and [verification](docs/verification.md) for the evidence required before release.
+The [architecture guide](docs/architecture.md) describes ownership boundaries.
+The [verification guide](docs/verification.md) lists the deployment checks.
 
 ## What we are building
 
@@ -75,9 +79,9 @@ These paths contain implementation work; their presence does not establish compl
 Read the [contribution guide](CONTRIBUTING.md) and [Rust conventions](docs/rust.md) first. The repository pins its toolchain in [`rust-toolchain.toml`](rust-toolchain.toml) and shares dependency definitions in [`Cargo.toml`](Cargo.toml).
 
 The workspace pins `chopin-protocol` and `chopin-job-broker` to the immutable
-`0.7.0-rc1` source revision in `Cargo.toml` and `Cargo.lock`. Cargo retrieves that
+`0.7.0-rc2` source revision in `Cargo.toml` and `Cargo.lock`. Cargo retrieves that
 public source directly; a sibling development checkout is not required. The
-[source tag](https://github.com/CodePrometheus/chopin-ai/tree/v0.7.0-rc1) also contains
+[source tag](https://github.com/CodePrometheus/chopin-ai/tree/v0.7.0-rc2) also contains
 the execution service packages. The [Android development notes](apps/android/README.md)
 describe its tooling. Debug application and instrumentation builds have passed;
 this does not establish release packaging or the complete cloud workflow.

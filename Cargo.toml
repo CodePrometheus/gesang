@@ -3,7 +3,7 @@ members = ["crates/gesang-api", "crates/gesang-core", "crates/gesang-plugins", "
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-rc1"
 edition = "2024"
 rust-version = "1.100"
 license = "Apache-2.0"
@@ -13,8 +13,8 @@ repository = "https://github.com/CodePrometheus/gesang"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "original-uri"] }
 base64 = "0.23.1"
-chopin-protocol = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "0003c4f24957fc040aaa56f247828bc2e4420024", version = "=0.7.0-rc1" }
-chopin-job-broker = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "0003c4f24957fc040aaa56f247828bc2e4420024", version = "=0.7.0-rc1", features = ["transport"] }
+chopin-protocol = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "91251b63ed9beb2842b0d8bdaa7a07b792401902", version = "=0.7.0-rc2" }
+chopin-job-broker = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "91251b63ed9beb2842b0d8bdaa7a07b792401902", version = "=0.7.0-rc2", features = ["transport"] }
 chacha20poly1305 = "0.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }
 getrandom = "0.4.3"
