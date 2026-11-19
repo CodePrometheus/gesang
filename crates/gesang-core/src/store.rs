@@ -7,7 +7,7 @@ use gesang_api::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{
@@ -172,9 +172,38 @@ impl Store {
     }
 
     /// Persists an immutable host placement before adopting an existing workspace.
+    /// First-store operations must use the custody-bound initialization entry point.
     pub async fn bind_placement(
         &self,
         owner: &Owner,
+        agent_id: Uuid,
+        workspace_keys: &[String],
+        placement: &str,
+    ) -> Result<()> {
+        let mut tx = self.begin().await?;
+        let row = sqlx::query("SELECT * FROM gesang_agents WHERE id=$1 AND owner_id=$2 FOR UPDATE")
+            .bind(agent_id)
+            .bind(owner.id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::NotFound)?;
+        let initializing: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM gesang_initializations WHERE agent_id=$1)",
+        )
+        .bind(agent_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if initializing {
+            return Err(Error::Forbidden);
+        }
+        Self::bind_placement_in(&mut tx, &row, agent_id, workspace_keys, placement).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn bind_placement_in(
+        connection: &mut PgConnection,
+        agent: &PgRow,
         agent_id: Uuid,
         workspace_keys: &[String],
         placement: &str,
@@ -191,20 +220,13 @@ impl Store {
                 "placement requires distinct physical resource identities".into(),
             ));
         }
-        let mut tx = self.begin().await?;
-        let row = sqlx::query("SELECT * FROM gesang_agents WHERE id=$1 AND owner_id=$2 FOR UPDATE")
-            .bind(agent_id)
-            .bind(owner.id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::NotFound)?;
-        let existing = workspace_resources(&mut tx, agent_id).await?;
-        let prior_placement: Option<String> = row.try_get("legacy_reference")?;
+        let existing = workspace_resources(connection, agent_id).await?;
+        let prior_placement: Option<String> = agent.try_get("legacy_reference")?;
         if prior_placement
             .as_deref()
             .is_some_and(|prior| prior != placement)
             || (!existing.is_empty() && existing != keys)
-            || (existing.is_empty() && row.try_get::<Option<Uuid>, _>("runtime_id")?.is_some())
+            || (existing.is_empty() && agent.try_get::<Option<Uuid>, _>("runtime_id")?.is_some())
         {
             return Err(Error::VersionConflict);
         }
@@ -216,7 +238,7 @@ impl Store {
         )
         .bind(agent_id)
         .bind(&keys)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *connection)
         .await?;
         if bound.len() != keys.len() {
             return Err(Error::VersionConflict);
@@ -224,9 +246,8 @@ impl Store {
         sqlx::query("UPDATE gesang_agents SET legacy_reference=$1 WHERE id=$2")
             .bind(placement)
             .bind(agent_id)
-            .execute(&mut *tx)
+            .execute(connection)
             .await?;
-        tx.commit().await?;
         Ok(())
     }
 

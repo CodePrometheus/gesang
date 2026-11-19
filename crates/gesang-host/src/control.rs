@@ -42,6 +42,10 @@ pub enum ExecutionAction {
 /// Host-owned resource policy required even when the owner selected full access.
 #[async_trait]
 pub trait ControlPolicy: Send + Sync {
+    /// Independently verifies the exact execution writer and its protected resource binding before unlock.
+    async fn verify_execution(&self, _binding: &AgentBinding, _runtime: &Runtime) -> Result<()> {
+        Err(Error::FencingRequired)
+    }
     /// Verifies the original initialization plan, newly created resources and exact protected writer.
     async fn verify_initialization(
         &self,
@@ -71,6 +75,7 @@ pub struct ControlPlane {
     policy: Arc<dyn ControlPolicy>,
     migration_custody: Option<Arc<Custody>>,
     initialization_custody: Option<Arc<Custody>>,
+    execution_custody: Option<Arc<Custody>>,
     recovery_interval: TimeDelta,
 }
 
@@ -101,6 +106,7 @@ impl ControlPlane {
             policy,
             migration_custody: None,
             initialization_custody: None,
+            execution_custody: None,
             recovery_interval,
         })
     }
@@ -119,6 +125,13 @@ impl ControlPlane {
         self
     }
 
+    /// Enables unattended unlock only for the current independently verified execution writer.
+    #[must_use]
+    pub fn with_execution_custody(mut self, custody: Arc<Custody>) -> Self {
+        self.execution_custody = Some(custody);
+        self
+    }
+
     /// Builds internal routes with a deployment-configured request envelope bound.
     ///
     /// Mount on a protected listener. Only the trusted execution process receives its
@@ -127,6 +140,7 @@ impl ControlPlane {
         Router::new()
             .route("/internal/v1/authority", post(authority))
             .route("/internal/v1/migration/key", post(migration_key))
+            .route("/internal/v1/execution/key", post(execution_key))
             .route(
                 "/internal/v1/initialization/verify",
                 post(initialization_verify),
@@ -186,6 +200,19 @@ impl ControlPlane {
     async fn migration_phase(&self, runtime: &Runtime) -> Result<()> {
         if self.store.instance_phase(runtime).await?
             != (InstancePurpose::Migration, InstancePhase::Migrating)
+        {
+            return Err(Error::Forbidden);
+        }
+        Ok(())
+    }
+
+    async fn execution_phase(&self, runtime: &Runtime) -> Result<()> {
+        let (purpose, phase) = self.store.instance_phase(runtime).await?;
+        if purpose != InstancePurpose::Execution
+            || !matches!(
+                phase,
+                InstancePhase::Starting | InstancePhase::Unlocking | InstancePhase::Ready
+            )
         {
             return Err(Error::Forbidden);
         }
@@ -337,7 +364,7 @@ async fn initialization_complete(
 
 #[derive(Serialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
-struct MigrationKey {
+struct RuntimeKey {
     revision: i64,
     service_key: String,
 }
@@ -346,7 +373,7 @@ async fn migration_key(
     State(state): State<ControlPlane>,
     headers: HeaderMap,
     Json(request): Json<IdentityRequest>,
-) -> std::result::Result<Json<MigrationKey>, Failure> {
+) -> std::result::Result<Json<RuntimeKey>, Failure> {
     let runtime = state
         .runtime(&headers, request.agent_id, request.epoch, &request.owner)
         .await?;
@@ -354,7 +381,28 @@ async fn migration_key(
     let custody = state.migration_custody.as_ref().ok_or(Error::Forbidden)?;
     let lease = custody.release(binding.agent.owner_id, &runtime).await?;
     state.migration_phase(&runtime).await?;
-    Ok(Json(MigrationKey {
+    Ok(Json(RuntimeKey {
+        revision: lease.revision,
+        service_key: BASE64_URL_SAFE_NO_PAD.encode(lease.key.expose()),
+    }))
+}
+
+async fn execution_key(
+    State(state): State<ControlPlane>,
+    headers: HeaderMap,
+    Json(request): Json<IdentityRequest>,
+) -> std::result::Result<Json<RuntimeKey>, Failure> {
+    let runtime = state
+        .runtime(&headers, request.agent_id, request.epoch, &request.owner)
+        .await?;
+    state.execution_phase(&runtime).await?;
+    let custody = state.execution_custody.as_ref().ok_or(Error::Forbidden)?;
+    let binding = state.store.agent_binding(runtime.agent_id).await?;
+    state.policy.verify_execution(&binding, &runtime).await?;
+    state.execution_phase(&runtime).await?;
+    let lease = custody.release(binding.agent.owner_id, &runtime).await?;
+    state.execution_phase(&runtime).await?;
+    Ok(Json(RuntimeKey {
         revision: lease.revision,
         service_key: BASE64_URL_SAFE_NO_PAD.encode(lease.key.expose()),
     }))

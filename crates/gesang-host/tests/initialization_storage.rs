@@ -50,6 +50,34 @@ impl ControlPolicy for FixturePolicy {
 #[tokio::test]
 #[ignore = "requires isolated database, compiled initializer and actual native storage module"]
 async fn actual_initializer_and_existing_store_reconciliation_share_one_key_marker_and_receipt() {
+    verify_initialization("reconcile").await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated database, compiled initializer and actual native storage module"]
+async fn key_response_loss() {
+    verify_initialization("key-response-lost").await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated database, compiled initializer and actual native storage module"]
+async fn genesis_interruption() {
+    verify_initialization("genesis-interrupted").await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated database, compiled initializer and actual native storage module"]
+async fn completion_response_loss() {
+    verify_initialization("completion-response-lost").await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated database, compiled initializer and actual native storage module"]
+async fn closed_store_interruption() {
+    verify_initialization("completion-interrupted").await;
+}
+
+async fn verify_initialization(scenario: &str) {
     let url =
         std::env::var("GESANG_TEST_DATABASE_URL").expect("isolated integration database required");
     let probe = std::env::var("GESANG_TEST_INITIALIZATION_PROBE")
@@ -91,21 +119,19 @@ async fn actual_initializer_and_existing_store_reconciliation_share_one_key_mark
         CustodyKey::new([23; 32]).unwrap(),
     ));
     let operation = Uuid::new_v4();
+    let request = InitializationRequest {
+        operation_id: operation,
+        plan_digest: [19; 32],
+    };
     custody
-        .begin_initialization(
-            &owner,
-            agent.id,
-            &InitializationRequest {
-                operation_id: operation,
-                plan_digest: [19; 32],
-            },
-        )
+        .begin_initialization(&owner, agent.id, &request)
         .await
         .unwrap();
-    store
-        .bind_placement(
+    custody
+        .bind_initialization_placement(
             &owner,
             agent.id,
+            &request,
             &[format!("test-native:{operation}")],
             "native-fixture",
         )
@@ -177,6 +203,7 @@ async fn actual_initializer_and_existing_store_reconciliation_share_one_key_mark
         .env("CHOPIN_AGENT_ID", agent.id.to_string())
         .env("CHOPIN_RUNTIME_EPOCH", runtime.generation.to_string())
         .env("CHOPIN_TEST_STORAGE_DIR", &destination)
+        .env("CHOPIN_TEST_INITIALIZATION_SCENARIO", scenario)
         .env(
             "CHOPIN_TEST_INITIALIZATION_OPERATION_ID",
             operation.to_string(),
@@ -200,9 +227,16 @@ async fn actual_initializer_and_existing_store_reconciliation_share_one_key_mark
         String::from_utf8_lossy(&output.stderr)
     );
     let observed: Value = serde_json::from_slice(&output.stdout).unwrap();
-    for property in ["initialized", "reconciled", "encrypted", "noProjectStarted"] {
+    for property in [
+        "initialized",
+        "reconciled",
+        "encrypted",
+        "noProjectStarted",
+        "keyConsistent",
+    ] {
         assert_eq!(observed[property], true);
     }
+    assert_eq!(observed["faultObserved"], scenario != "reconcile");
     let record = custody
         .initialization(&owner, agent.id)
         .await

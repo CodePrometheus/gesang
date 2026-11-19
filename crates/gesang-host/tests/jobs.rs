@@ -37,6 +37,9 @@ use sqlx::{
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
+#[path = "jobs/node-client.rs"]
+mod node_client;
+
 #[derive(Default)]
 struct Policy {
     deny: AtomicBool,
@@ -144,6 +147,7 @@ struct Fixture {
     authority: Arc<JobAuthority>,
     policy: Arc<Policy>,
     worker: Arc<Worker>,
+    settings: Settings,
     broker: Broker,
 }
 
@@ -232,6 +236,15 @@ impl Fixture {
             .await
             .unwrap();
         let agent = store.ensure_agent(&owner, "engine", "local").await.unwrap();
+        store
+            .bind_placement(
+                &owner,
+                agent.id,
+                &[format!("fixture:{schema}")],
+                "command-fixture",
+            )
+            .await
+            .unwrap();
         let runtime = allocate(&store, &owner, agent.id, InstancePurpose::Execution).await;
         let grant = store
             .select_grant(
@@ -258,21 +271,22 @@ impl Fixture {
             launch: Mutex::new(None),
             lookups: Mutex::new(vec![]),
         });
+        let settings = Settings {
+            version: 1,
+            revision: "fixture".into(),
+            poll_after_ms: 1,
+            recovery_interval_ms: 7,
+            request_timeout_ms: 1000,
+            frame_bytes: 32,
+            output_page_bytes: 64,
+            max_body_bytes: 4096,
+        };
         let broker = Broker::new(
             store.pool().clone(),
             Ledger::new(JobKey::new([31; 32])),
             authority.clone(),
             worker.clone(),
-            Settings {
-                version: 1,
-                revision: "fixture".into(),
-                poll_after_ms: 1,
-                recovery_interval_ms: 7,
-                request_timeout_ms: 1000,
-                frame_bytes: 32,
-                output_page_bytes: 64,
-                max_body_bytes: 4096,
-            },
+            settings.clone(),
             "http://broker.invalid/internal/jobs/",
         )
         .unwrap();
@@ -285,6 +299,7 @@ impl Fixture {
             authority,
             policy,
             worker,
+            settings,
             broker,
         }
     }

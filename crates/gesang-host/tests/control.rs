@@ -47,6 +47,28 @@ use uuid::Uuid;
 
 struct Policy;
 
+struct ExecutionPolicy(AtomicBool);
+
+#[async_trait]
+impl ControlPolicy for ExecutionPolicy {
+    async fn verify_execution(&self, binding: &AgentBinding, runtime: &Runtime) -> Result<()> {
+        assert_eq!(binding.agent.id, runtime.agent_id);
+        assert_eq!(binding.engine_owner, runtime.engine_owner);
+        if !self.0.load(Ordering::SeqCst) {
+            return Err(Error::FencingRequired);
+        }
+        Ok(())
+    }
+
+    async fn requirements(
+        &self,
+        _: &AgentBinding,
+        _: &ExecutionAction,
+    ) -> Result<Vec<CapabilityScope>> {
+        Err(Error::Forbidden)
+    }
+}
+
 #[async_trait]
 impl ControlPolicy for Policy {
     async fn requirements(
@@ -120,15 +142,33 @@ impl Fixture {
             .ensure_agent(&owner, "execution-v1", "local")
             .await
             .unwrap();
-        store
-            .bind_placement(
-                &owner,
-                agent.id,
-                &[format!("fixture:{schema}")],
-                "fixture-volume",
-            )
-            .await
-            .unwrap();
+        let resources = [format!("fixture:{schema}")];
+        if purpose == InstancePurpose::Initialization {
+            let custody = Custody::new(store.clone(), CustodyKey::new([4; 32]).unwrap());
+            let request = gesang_core::InitializationRequest {
+                operation_id: Uuid::new_v4(),
+                plan_digest: [19; 32],
+            };
+            custody
+                .begin_initialization(&owner, agent.id, &request)
+                .await
+                .unwrap();
+            custody
+                .bind_initialization_placement(
+                    &owner,
+                    agent.id,
+                    &request,
+                    &resources,
+                    "fixture-volume",
+                )
+                .await
+                .unwrap();
+        } else {
+            store
+                .bind_placement(&owner, agent.id, &resources, "fixture-volume")
+                .await
+                .unwrap();
+        }
         let claim = store
             .claim_runtime(agent.id, Uuid::new_v4(), TimeDelta::minutes(1))
             .await
@@ -902,6 +942,146 @@ async fn startup_can_reconcile_storage_but_cannot_resume_or_execute_before_ready
         fixture.post("/internal/v1/anchor/read", json!({})).await.0,
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a real isolated transactional database"]
+async fn execution_key_requires_current_custody_writer_and_explicit_host_verification() {
+    let (mut f, starting) = Fixture::admitted(InstancePurpose::Execution).await;
+    let custody = Arc::new(Custody::new(
+        f.store.clone(),
+        CustodyKey::new([4; 32]).unwrap(),
+    ));
+    custody
+        .enroll(
+            &f.owner,
+            f.runtime.agent_id,
+            &CustodyEnrollment {
+                operation_id: Uuid::new_v4(),
+                expected_revision: 0,
+                service_key: ServiceKey::new([3; 32]),
+            },
+            &FixtureKeyVerifier,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.post("/internal/v1/execution/key", json!({})).await.0,
+        StatusCode::FORBIDDEN
+    );
+    f.plane = f.plane.clone().with_execution_custody(custody.clone());
+    assert_eq!(
+        f.post("/internal/v1/execution/key", json!({})).await.0,
+        StatusCode::CONFLICT
+    );
+    let policy = Arc::new(ExecutionPolicy(AtomicBool::new(true)));
+    f.plane = ControlPlane::new(
+        f.store.clone(),
+        f.key.clone(),
+        policy.clone(),
+        TimeDelta::seconds(10),
+    )
+    .unwrap()
+    .with_execution_custody(custody.clone());
+    let response = json!({"revision":1,"serviceKey":BASE64_URL_SAFE_NO_PAD.encode([3;32])});
+    assert_eq!(
+        f.post("/internal/v1/execution/key", json!({})).await,
+        (StatusCode::OK, response.clone())
+    );
+    let unlocking = f
+        .store
+        .transition_instance(&starting, InstancePhase::Unlocking)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.post("/internal/v1/execution/key", json!({})).await,
+        (StatusCode::OK, response.clone())
+    );
+    let ready = f
+        .store
+        .transition_instance(&unlocking, InstancePhase::Ready)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.post("/internal/v1/execution/key", json!({})).await,
+        (StatusCode::OK, response)
+    );
+    assert_eq!(
+        f.post_as("/internal/v1/execution/key", json!({}), &f.runtime, "wrong")
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let mut foreign = f.runtime.clone();
+    foreign.engine_owner = "foreign-owner".into();
+    let token = f.key.issue(&f.runtime).unwrap();
+    assert_eq!(
+        f.post_as(
+            "/internal/v1/execution/key",
+            json!({}),
+            &foreign,
+            token.expose()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    policy.0.store(false, Ordering::SeqCst);
+    assert_eq!(
+        f.post("/internal/v1/execution/key", json!({})).await.0,
+        StatusCode::CONFLICT
+    );
+    let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM gesang_custody_releases")
+        .fetch_one(f.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(releases, 3);
+    policy.0.store(true, Ordering::SeqCst);
+    f.store
+        .transition_instance(&ready, InstancePhase::Draining)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.post("/internal/v1/execution/key", json!({})).await.0,
+        StatusCode::FORBIDDEN
+    );
+    custody
+        .revoke(&f.owner, f.runtime.agent_id, Uuid::new_v4(), 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.post("/internal/v1/execution/key", json!({})).await.0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a real isolated transactional database"]
+async fn nonexecution_writers_never_receive_execution_keys() {
+    for purpose in [InstancePurpose::Migration, InstancePurpose::Initialization] {
+        let (mut f, _) = Fixture::admitted(purpose).await;
+        let custody = Arc::new(Custody::new(
+            f.store.clone(),
+            CustodyKey::new([4; 32]).unwrap(),
+        ));
+        f.plane = ControlPlane::new(
+            f.store.clone(),
+            f.key.clone(),
+            Arc::new(ExecutionPolicy(AtomicBool::new(true))),
+            TimeDelta::seconds(10),
+        )
+        .unwrap()
+        .with_execution_custody(custody);
+        assert_eq!(
+            f.post("/internal/v1/execution/key", json!({})).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM gesang_custody_releases")
+            .fetch_one(f.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(releases, 0);
+    }
 }
 
 struct MigrationPolicy {

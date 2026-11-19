@@ -4,10 +4,37 @@ use zeroize::Zeroizing;
 
 use crate::{
     AnchorHead, Custody, CustodyReceipt, Error, Initialization, InitializationKeyLease,
-    InitializationRequest, InitializationState, Owner, Result, Runtime, ServiceKey,
+    InitializationRequest, InitializationState, Owner, Result, Runtime, ServiceKey, Store,
 };
 
 impl Custody {
+    /// Binds independently verified first-store resources to the original pending operation.
+    ///
+    /// Revocation and binding lock the same agent row. Repeating the exact pending binding
+    /// is safe. A changed operation, revoked key or competing resource binding is refused.
+    /// A successful binding does not admit an initializer or release its key.
+    pub async fn bind_initialization_placement(
+        &self,
+        owner: &Owner,
+        agent_id: Uuid,
+        expected: &InitializationRequest,
+        workspace_keys: &[String],
+        placement: &str,
+    ) -> Result<()> {
+        let mut tx = self.store.begin().await?;
+        let agent = super::lock_agent(&mut tx, owner, agent_id).await?;
+        let original = record(&mut tx, agent_id).await?.ok_or(Error::NotFound)?;
+        if &request(&original)? != expected {
+            return Err(Error::RequestConflict);
+        }
+        if original.try_get::<&str, _>("state")? != "pending" {
+            return Err(Error::Forbidden);
+        }
+        Store::bind_placement_in(&mut tx, &agent, agent_id, workspace_keys, placement).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Persists a first-store key before provisioning; only an entirely unbound agent may begin.
     pub async fn begin_initialization(
         &self,

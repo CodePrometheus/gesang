@@ -32,7 +32,7 @@ fn run() -> Result<()> {
     match task.to_str() {
         Some("help" | "--help" | "-h") => {
             println!(
-                "Usage: cargo xtask <task>\n\nTasks:\n  check                Formatting, strict lint, unit tests, and API documentation\n  fmt                  Check repository formatting without changing files\n  lint                 Strict static checks for every workspace target\n  test                 Workspace tests, excluding explicitly ignored integration tests\n  test-engine          Real service and host protocol integration; requires explicit integration settings\n  test-store           Real transactional store tests; requires GESANG_TEST_DATABASE_URL\n  test-sandbox         Real resource API and process recovery; requires explicit local runtime settings\n  prepare-sql          Generate offline query metadata from source migrations in an isolated test schema\n  check-sql            Verify query metadata against source migrations in an isolated test schema\n  test-storage         Real native execution storage recovery; requires explicit integration settings\n  test-initialization  Real native first-store creation and reconciliation through shared custody\n  doc                  Check API documentation with warnings treated as errors\n  android-setup        Install the pinned official native toolchain\n  android-native       Build native libraries and generated Kotlin bindings"
+                "Usage: cargo xtask <task>\n\nTasks:\n  check                Formatting, strict lint, unit tests, and API documentation\n  fmt                  Check repository formatting without changing files\n  lint                 Strict static checks for every workspace target\n  test                 Workspace tests, excluding explicitly ignored integration tests\n  test-engine          Real service and host protocol integration; requires explicit integration settings\n  test-store           Real transactional store tests; requires GESANG_TEST_DATABASE_URL\n  test-jobs            Real Node command client, broker admission and original-operation recovery\n  test-command-goals   Real encrypted goal recovery through shared authority and command broker\n  test-sandbox         Real resource API and process recovery; requires explicit local runtime settings\n  prepare-sql          Generate offline query metadata from source migrations in an isolated test schema\n  check-sql            Verify query metadata against source migrations in an isolated test schema\n  test-storage         Real native execution storage recovery; requires explicit integration settings\n  test-initialization  Real native first-store creation and reconciliation through shared custody\n  doc                  Check API documentation with warnings treated as errors\n  android-setup        Install the pinned official native toolchain\n  android-native       Build native libraries and generated Kotlin bindings"
             );
             Ok(())
         }
@@ -53,6 +53,59 @@ fn run() -> Result<()> {
             let mut command = Command::new("python3");
             command.arg("scripts/test-engine.py");
             execute(command)
+        }
+        Some("test-command-goals") => {
+            for name in [
+                "GESANG_TEST_DATABASE_URL",
+                "GESANG_TEST_COMMAND_GOAL_PROBE",
+                "CHOPIN_STORAGE_NATIVE",
+                "GESANG_TEST_OPERATION_TIMEOUT_MS",
+            ] {
+                if env::var_os(name).is_none_or(|value| value.is_empty()) {
+                    return Err(io::Error::other(format!(
+                        "{name} is required for protected command goal recovery tests"
+                    ))
+                    .into());
+                }
+            }
+            cargo(&[
+                "test",
+                "--locked",
+                "-p",
+                "gesang-host",
+                "--test",
+                "jobs",
+                "node_client::goal_restart",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ])
+        }
+        Some("test-jobs") => {
+            for name in [
+                "GESANG_TEST_DATABASE_URL",
+                "GESANG_TEST_JOB_PROBE",
+                "GESANG_TEST_OPERATION_TIMEOUT_MS",
+            ] {
+                if env::var_os(name).is_none_or(|value| value.is_empty()) {
+                    return Err(io::Error::other(format!(
+                        "{name} is required for command client interoperability tests"
+                    ))
+                    .into());
+                }
+            }
+            cargo(&[
+                "test",
+                "--locked",
+                "-p",
+                "gesang-host",
+                "--test",
+                "jobs",
+                "node_client::interrupted_submit",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ])
         }
         Some("test-store") => {
             if env::var_os("GESANG_TEST_DATABASE_URL").is_none() {
@@ -96,6 +149,8 @@ fn run() -> Result<()> {
                 "--",
                 "--ignored",
                 "--nocapture",
+                "--skip",
+                "node_client::",
             ])?;
             cargo(&[
                 "test",

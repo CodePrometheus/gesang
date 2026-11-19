@@ -123,10 +123,11 @@ impl Fixture {
     }
 
     async fn bind(&self) {
-        self.store
-            .bind_placement(
+        self.custody
+            .bind_initialization_placement(
                 &self.owner,
                 self.agent_id,
+                &self.request,
                 &[format!("fixture:{}", self.agent_id)],
                 "fresh-fixture",
             )
@@ -265,6 +266,22 @@ async fn first_store_key_is_durable_scoped_and_never_replaces_an_existing_bindin
         reopened.initialization(&foreign, f.agent_id).await,
         Err(Error::NotFound)
     ));
+    let keys = [format!("fixture:{}", f.agent_id)];
+    assert!(matches!(
+        f.store
+            .bind_placement(&f.owner, f.agent_id, &keys, "fresh-fixture")
+            .await,
+        Err(Error::Forbidden)
+    ));
+    let mut changed = f.request.clone();
+    changed.plan_digest[0] ^= 1;
+    assert!(matches!(
+        f.custody
+            .bind_initialization_placement(&f.owner, f.agent_id, &changed, &keys, "fresh-fixture")
+            .await,
+        Err(Error::RequestConflict)
+    ));
+    f.bind().await;
     f.bind().await;
     let intent = f.allocate(InstancePurpose::Initialization).await;
     assert_eq!(intent.phase, InstancePhase::Initializing);
@@ -316,7 +333,15 @@ async fn first_store_key_is_durable_scoped_and_never_replaces_an_existing_bindin
             .is_err()
     );
     let g = Fixture::new().await;
-    g.bind().await;
+    g.store
+        .bind_placement(
+            &g.owner,
+            g.agent_id,
+            &["existing-fixture".into()],
+            "existing",
+        )
+        .await
+        .unwrap();
     assert!(matches!(
         g.custody
             .begin_initialization(&g.owner, g.agent_id, &g.request)
@@ -324,6 +349,35 @@ async fn first_store_key_is_durable_scoped_and_never_replaces_an_existing_bindin
         Err(Error::Forbidden)
     ));
     g.store.pool().close().await;
+    f.store.pool().close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real isolated transactional database"]
+async fn revoked_initialization_cannot_bind_resources() {
+    let f = Fixture::new().await;
+    f.custody
+        .begin_initialization(&f.owner, f.agent_id, &f.request)
+        .await
+        .unwrap();
+    f.custody
+        .revoke(&f.owner, f.agent_id, Uuid::new_v4(), 0)
+        .await
+        .unwrap();
+    assert!(matches!(
+        f.custody
+            .bind_initialization_placement(
+                &f.owner,
+                f.agent_id,
+                &f.request,
+                &["test:volume".into()],
+                "fresh-fixture"
+            )
+            .await,
+        Err(Error::Forbidden)
+    ));
+    let binding = f.store.agent_binding(f.agent_id).await.unwrap();
+    assert!(binding.placement.is_none() && binding.workspace_keys.is_empty());
     f.store.pool().close().await;
 }
 

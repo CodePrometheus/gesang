@@ -19,6 +19,42 @@ not establish cloud model quality, production resource authorization, or deploym
 
 ## Shared services and package references
 
+`cargo xtask test-jobs` verifies the compiled Node command client against the real
+HTTP broker, purpose-bound host credentials and an isolated transactional database.
+Set `GESANG_TEST_JOB_PROBE` to the execution producer's
+`packages/harness-pi/scripts/jobs-probe.mjs`, `GESANG_TEST_DATABASE_URL` to a dedicated
+database, and `GESANG_TEST_OPERATION_TIMEOUT_MS` to the environment's operation deadline.
+Build that producer with `pnpm build` first. The probe kills the actual submitting
+process after durable acceptance and before its response, then starts a new client
+to recover the original operation and binary output. Revocation rejects new work
+while retaining original observations. Worker process facts are explicit fixtures;
+this check does not establish physical sandbox isolation or command execution.
+The ordinary store suite excludes this additional Node interoperability check.
+
+`cargo xtask test-command-goals` combines the actual agent service, native encrypted
+store, shared HTTP authority, transactional command broker and tool contribution.
+Set `GESANG_TEST_COMMAND_GOAL_PROBE` to the producer's
+`packages/harness-pi/scripts/command-goal-probe.mjs`, `CHOPIN_STORAGE_NATIVE` to its
+compiled native store module, and the database and operation-deadline variables
+above. Build the producer and native module first. The fixture prepares a new
+protected store; execution children reopen it without creation permission. The
+submitting execution process is killed after acceptance and before the response,
+then a fresh process resumes the same goal and commits its verified tool result.
+Actual grants and freshness anchors are checked throughout. Each execution child
+obtains its key through the current custody callback; its environment contains no
+store key. The check verifies both durable release audit records and native vault
+opening after release. Enrollment verification, physical writer facts
+and model responses are explicit fixtures; first-store initialization, physical
+sandbox execution, cloud provisioning and model quality require separate checks.
+
+The combined probe now calls the production `openCloudRuntime()` entry rather
+than assembling a separate test-only service. Test preparation creates the vault
+and protected store; execution children only reopen them. The runtime's actual
+controller listener, home synchronization, current authority, command contribution
+and paused restoration are active. The probe injects its deterministic model and
+trusted evidence verifier. CLI configuration refusal and early-startup guards run
+separately; a live-provider CLI deployment remains part of remote acceptance.
+
 `cargo xtask check` runs lifecycle unit tests and the authority construction contract.
 `cargo xtask test-store`, with `GESANG_TEST_DATABASE_URL` set to a dedicated database,
 also runs shared-service and package-reference tests against isolated real schemas.
