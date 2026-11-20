@@ -11,7 +11,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, TimeDelta, Utc};
 use gesang_api::{GrantSelection, PermissionMode};
 use gesang_core::{
     Activity, Admission, AnchorHead, CommandRequirements, Dispatch, EngineBridge,
@@ -20,6 +19,7 @@ use gesang_core::{
     PendingAnchor, PreparationProgress, PreviousWriter, Result, Runtime, RuntimeClaim,
     RuntimePolicy, Store, VerifiedIdentity, Wake,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
 use sqlx::{
     Executor,
@@ -85,7 +85,7 @@ impl Fixture {
 
     async fn claim(&self, controller: Uuid) -> RuntimeClaim {
         self.store
-            .claim_runtime(self.agent_id, controller, TimeDelta::minutes(1))
+            .claim_runtime(self.agent_id, controller, SignedDuration::from_mins(1))
             .await
             .unwrap()
     }
@@ -340,7 +340,7 @@ async fn migration_is_storage_only_and_completes_only_at_the_confirmed_target_he
                     active: true,
                     at: None
                 },
-                TimeDelta::seconds(1)
+                SignedDuration::from_secs(1)
             )
             .await,
         Err(Error::Forbidden)
@@ -562,7 +562,7 @@ impl InstanceProvider for Provider {
             .get(&runtime.id)
             .unwrap_or(&InstanceObservation::Unknown))
     }
-    async fn retain_until(&self, runtime: &Runtime, _: DateTime<Utc>) -> Result<()> {
+    async fn retain_until(&self, runtime: &Runtime, _: Timestamp) -> Result<()> {
         self.store.verify_writer(runtime).await
     }
     async fn stop(&self, runtime: &Runtime) -> Result<()> {
@@ -615,10 +615,10 @@ fn controller(store: &Store, provider: Arc<Provider>, engine: Arc<Engine>) -> Ke
         provider,
         engine,
         RuntimePolicy {
-            lease: TimeDelta::minutes(1),
-            delivery_lease: TimeDelta::seconds(10),
-            retry_delay: TimeDelta::seconds(1),
-            recovery_interval: TimeDelta::seconds(5),
+            lease: SignedDuration::from_mins(1),
+            delivery_lease: SignedDuration::from_secs(10),
+            retry_delay: SignedDuration::from_secs(1),
+            recovery_interval: SignedDuration::from_secs(5),
         },
     )
     .unwrap()
@@ -737,7 +737,7 @@ async fn completed_migration_gets_a_new_generation_before_execution_can_resume()
 async fn schema_upgrade_preserves_an_existing_admission_without_reviving_an_expired_writer() {
     let fixture = Fixture::migrated_to(Some(7)).await;
     let controller_id = Uuid::new_v4();
-    let expires_at = sqlx::query_scalar("UPDATE gesang_agents SET generation=1,controller_id=$2,lease_until=clock_timestamp()+interval '1 minute' WHERE id=$1 RETURNING lease_until")
+    let gesang_core::PostgresTimestamp(expires_at) = sqlx::query_scalar("UPDATE gesang_agents SET generation=1,controller_id=$2,lease_until=clock_timestamp()+interval '1 minute' WHERE id=$1 RETURNING lease_until")
         .bind(fixture.agent_id).bind(controller_id).fetch_one(fixture.store.pool()).await.unwrap();
     let claim = RuntimeClaim {
         agent: fixture

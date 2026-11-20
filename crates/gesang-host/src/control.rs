@@ -10,13 +10,13 @@ use axum::{
     routing::post,
 };
 use base64::{Engine as _, prelude::BASE64_URL_SAFE_NO_PAD};
-use chrono::{DateTime, TimeDelta};
 use gesang_api::{ApiProblem, CapabilityScope};
 use gesang_core::{
     AgentBinding, Anchor, AnchorHead, Custody, CustodyReceipt, Error, Initialization,
     InitializationState, InstancePhase, InstancePurpose, Owner, PendingAnchor, Result, Runtime,
     Store, Wake,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -76,7 +76,7 @@ pub struct ControlPlane {
     migration_custody: Option<Arc<Custody>>,
     initialization_custody: Option<Arc<Custody>>,
     execution_custody: Option<Arc<Custody>>,
-    recovery_interval: TimeDelta,
+    recovery_interval: SignedDuration,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -93,11 +93,11 @@ impl ControlPlane {
         store: Store,
         key: Arc<ControlKey>,
         policy: Arc<dyn ControlPolicy>,
-        recovery_interval: TimeDelta,
+        recovery_interval: SignedDuration,
     ) -> Result<Self> {
-        if recovery_interval.num_milliseconds() <= 0 {
+        if !(1..=i128::from(i64::MAX)).contains(&recovery_interval.as_millis()) {
             return Err(Error::InvalidCommand(
-                "recovery interval must be positive".into(),
+                "recovery interval must be positive and fit in i64 milliseconds".into(),
             ));
         }
         Ok(Self {
@@ -413,8 +413,8 @@ async fn no_store(State(state): State<ControlPlane>, mut response: Response) -> 
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     if response.status() == StatusCode::SERVICE_UNAVAILABLE {
-        let millis = state.recovery_interval.num_milliseconds();
-        let seconds = millis / 1000 + i64::from(millis % 1000 != 0);
+        let millis = state.recovery_interval.as_millis();
+        let seconds = millis / 1000 + i128::from(millis % 1000 != 0);
         if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
             response.headers_mut().insert(header::RETRY_AFTER, value);
         }
@@ -703,8 +703,8 @@ async fn wake(
         .wake
         .at
         .map(|at| {
-            DateTime::from_timestamp_millis(at)
-                .ok_or_else(|| Error::InvalidCommand("invalid wake timestamp".into()))
+            Timestamp::from_millisecond(at)
+                .map_err(|_| Error::InvalidCommand("invalid wake timestamp".into()))
         })
         .transpose()?;
     state

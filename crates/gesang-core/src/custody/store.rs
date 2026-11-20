@@ -1,6 +1,6 @@
 use crate::CoordinationTransaction;
 use crate::store::database::{Executor, Row, query, query_scalar, statement};
-use chrono::TimeDelta;
+use jiff::SignedDuration;
 use uuid::Uuid;
 
 use super::{
@@ -243,7 +243,7 @@ impl Store {
     pub(crate) async fn claim_retirement(
         &self,
         claimant: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<Option<RuntimeRetirement>> {
         let millis = crate::store::positive_duration(duration)?;
         let mut tx = self.database.begin().await?;

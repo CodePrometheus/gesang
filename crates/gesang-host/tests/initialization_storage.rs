@@ -5,7 +5,6 @@ use std::{num::NonZeroUsize, str::FromStr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use base64::{Engine as _, prelude::BASE64_URL_SAFE_NO_PAD};
-use chrono::TimeDelta;
 use gesang_api::CapabilityScope;
 use gesang_core::{
     Admission, AgentBinding, Custody, CustodyKey, Error, Initialization, InitializationRequest,
@@ -13,6 +12,7 @@ use gesang_core::{
     Runtime, Store, VerifiedIdentity,
 };
 use gesang_host::{ControlKey, ControlPlane, ControlPolicy, ExecutionAction};
+use jiff::SignedDuration;
 use serde_json::{Value, json};
 use sqlx::{
     Executor,
@@ -141,7 +141,7 @@ async fn verify_initialization(scenario: &str) {
         .claim_runtime(
             agent.id,
             Uuid::new_v4(),
-            TimeDelta::milliseconds(milliseconds.try_into().unwrap()),
+            SignedDuration::from_millis(milliseconds.try_into().unwrap()),
         )
         .await
         .unwrap();
@@ -176,7 +176,7 @@ async fn verify_initialization(scenario: &str) {
         store.clone(),
         key,
         Arc::new(FixturePolicy { operation }),
-        TimeDelta::milliseconds(7),
+        SignedDuration::from_millis(7),
     )
     .unwrap()
     .with_initialization_custody(custody.clone())

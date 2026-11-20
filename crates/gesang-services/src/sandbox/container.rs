@@ -5,8 +5,8 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
 use gesang_plugins::ServiceEndpoint;
+use jiff::Timestamp;
 use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -91,7 +91,7 @@ pub struct PhysicalContainer {
     /// Current observed process state.
     pub state: ContainerState,
     /// Time of the recorded process start, absent when the instance has never started.
-    pub started_at: Option<DateTime<Utc>>,
+    pub started_at: Option<Timestamp>,
 }
 
 /// An immutable physical instance identifier; mutable name aliases cannot construct one.
@@ -157,7 +157,7 @@ struct EngineInfo {
     #[serde(rename = "ID")]
     id: String,
     #[serde(rename = "SystemTime")]
-    time: DateTime<Utc>,
+    time: Timestamp,
 }
 
 #[derive(Deserialize)]
@@ -201,7 +201,7 @@ struct InspectionConfig {
 struct InspectionState {
     running: bool,
     status: String,
-    started_at: DateTime<Utc>,
+    started_at: Timestamp,
 }
 
 #[derive(Deserialize)]
@@ -509,11 +509,10 @@ impl ContainerRuntime {
         profile: &ContainerProfile,
     ) -> Result<Termination> {
         let info = self.identity().await?;
-        let until = format!(
-            "{}.{:09}",
-            info.time.timestamp(),
-            info.time.timestamp_subsec_nanos()
-        );
+        let nanos = info.time.as_nanosecond();
+        let seconds = nanos.div_euclid(1_000_000_000);
+        let fraction = nanos.rem_euclid(1_000_000_000);
+        let until = format!("{seconds}.{fraction:09}");
         let filters =
             json!({"container":[id],"event":["destroy"],"type":["container"]}).to_string();
         let response = self
@@ -618,7 +617,8 @@ impl ContainerRuntime {
             ("exited", false) => ContainerState::Exited,
             _ => ContainerState::Unknown,
         };
-        let unstarted = DateTime::parse_from_rfc3339("0001-01-01T00:00:00Z")
+        let unstarted = "0001-01-01T00:00:00Z"
+            .parse::<Timestamp>()
             .map_err(|_| Error::ProviderData)?;
         Ok(Some(PhysicalContainer {
             id: physical_id,

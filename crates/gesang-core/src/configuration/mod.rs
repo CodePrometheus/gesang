@@ -5,8 +5,8 @@ mod store;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Utc};
 use gesang_plugins::{BindingScope, InstallationId};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -186,7 +186,7 @@ pub struct ConfigurationRevision<T> {
     /// Source revision copied by an explicit rollback publication.
     pub rollback_of: Option<i64>,
     /// Database-observed time of durable preparation.
-    pub prepared_at: DateTime<Utc>,
+    pub prepared_at: Timestamp,
     /// Present only after atomic publication, not after staging alone.
-    pub published_at: Option<DateTime<Utc>>,
+    pub published_at: Option<Timestamp>,
 }

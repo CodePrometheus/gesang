@@ -247,7 +247,7 @@ async fn goal_restart() {
         f.store.clone(),
         key,
         Arc::new(GoalControlPolicy),
-        TimeDelta::milliseconds(f.settings.recovery_interval_ms.try_into().unwrap()),
+        SignedDuration::from_millis(f.settings.recovery_interval_ms.try_into().unwrap()),
     )
     .unwrap()
     .with_execution_custody(custody);

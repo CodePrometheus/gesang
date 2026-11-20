@@ -3,10 +3,10 @@ mod queries;
 use std::collections::BTreeSet;
 
 use base64::{Engine as _, prelude::BASE64_URL_SAFE_NO_PAD};
-use chrono::{DateTime, Utc};
 use gesang_api::CapabilityScope;
 use gesang_core::Store;
 use gesang_plugins::{Authority, BindingScope, PrincipalId, ResourceScope};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Transaction};
@@ -148,7 +148,7 @@ pub struct CredentialGrant {
     /// Exact capability/resource pairs; no wildcard interpretation or implicit full access.
     pub scopes: BTreeSet<CapabilityScope>,
     /// Explicit expiry supplied by the host's credential policy.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 /// Concrete credential authentication and transactional authorization for default host services.

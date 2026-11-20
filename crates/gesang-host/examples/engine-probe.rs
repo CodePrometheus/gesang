@@ -18,13 +18,13 @@ use std::{
 
 use async_trait::async_trait;
 use chopin_protocol::{ChordClient, GoalCommand, GoalGrant};
-use chrono::TimeDelta;
 use gesang_api::{CommandAuthorization, GrantSelection, PermissionMode};
 use gesang_core::{
     Admission, Dispatch, EngineBridge, ExecutionResponse, PayloadKey, PreviousWriter, Runtime,
     Store, VerifiedIdentity,
 };
 use gesang_host::{EngineAdapter, EngineConnectionPolicy, EngineConnector};
+use jiff::SignedDuration;
 use serde_json::json;
 use sqlx::{
     Executor,
@@ -77,7 +77,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         .claim_runtime(
             agent.id,
             Uuid::new_v4(),
-            TimeDelta::milliseconds(timeout_millis.try_into()?),
+            SignedDuration::from_millis(timeout_millis.try_into()?),
         )
         .await?;
     let runtime = store

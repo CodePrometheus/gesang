@@ -1,7 +1,7 @@
-use chrono::{DateTime, Utc};
 use gesang_plugins::{
     Authority, BindingScope, InterfaceId, PackageVersion, PrincipalId, ServiceEndpoint,
 };
+use jiff::Timestamp;
 use sqlx::types::Json;
 use uuid::Uuid;
 
@@ -19,7 +19,7 @@ pub(super) struct BindingRow {
     pub request_digest: Vec<u8>,
     pub endpoint: Json<ServiceEndpoint>,
     pub package: Json<PackageVersion>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl TryFrom<Row> for BindingRow {

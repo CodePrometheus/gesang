@@ -251,7 +251,7 @@ fn project_update(
         entries: projected,
         visible_entry_ids,
         older_before: view.get("before").and_then(Value::as_u64),
-        synchronized_at_ms: chrono::Utc::now().timestamp_millis(),
+        synchronized_at_ms: crate::unix_milliseconds(jiff::Timestamp::now()),
         live: crate::transcript::project_live(
             view.get("docs").and_then(|docs| docs.get("pi.live")),
         ),

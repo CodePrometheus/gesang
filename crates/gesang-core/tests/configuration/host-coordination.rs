@@ -1,13 +1,13 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use chrono::{DateTime, TimeDelta, Utc};
 use gesang_api::{Agent, ApiProblem, CapabilityScope, CommandReceipt, CommandSubmission, Grant};
 use gesang_core::{
     Admission, AnchorHead, CommandRequirements, CoordinationStore, InstanceIntent, InstancePhase,
     InstancePlan, Owner, PendingCommand, PreviousWriter, Result, Runtime, RuntimeClaim,
     RuntimeRetirement, Store, WakeClaim,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -45,11 +45,11 @@ forward_coordination! {
     ) -> Result<CommandReceipt>;
     claim_command(
         claimant: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<Option<PendingCommand>>;
     accept_command(command: &PendingCommand, receipt: &Value) -> Result<()>;
     reject_command(command: &PendingCommand, problem: &ApiProblem) -> Result<()>;
-    defer_command(command: &PendingCommand, due_at: DateTime<Utc>) -> Result<()>;
+    defer_command(command: &PendingCommand, due_at: Timestamp) -> Result<()>;
     authorize(
         agent_id: Uuid,
         grant_id: Uuid,
@@ -59,7 +59,7 @@ forward_coordination! {
     claim_runtime(
         agent_id: Uuid,
         controller_id: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<RuntimeClaim>;
     instance_intent(claim: &RuntimeClaim) -> Result<Option<InstanceIntent>>;
     begin_instance(
@@ -84,11 +84,11 @@ forward_coordination! {
     advance_fenced_generation(claim: &RuntimeClaim) -> Result<RuntimeClaim>;
     claim_retirement(
         claimant: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<Option<RuntimeRetirement>>;
     verify_retirement(retirement: &RuntimeRetirement) -> Result<()>;
     finish_retirement(retirement: &RuntimeRetirement) -> Result<()>;
-    claim_wake(claimant: Uuid, duration: TimeDelta) -> Result<Option<WakeClaim>>;
-    schedule(agent_id: Uuid, due_at: DateTime<Utc>) -> Result<()>;
-    settle_wake(claim: &WakeClaim, next: Option<DateTime<Utc>>) -> Result<()>;
+    claim_wake(claimant: Uuid, duration: SignedDuration) -> Result<Option<WakeClaim>>;
+    schedule(agent_id: Uuid, due_at: Timestamp) -> Result<()>;
+    settle_wake(claim: &WakeClaim, next: Option<Timestamp>) -> Result<()>;
 }

@@ -7,7 +7,6 @@ use support::ReadyFixture;
 
 use std::{str::FromStr, sync::Arc};
 
-use chrono::{TimeDelta, Utc};
 use gesang_api::{
     CommandAuthorization, CommandSubmission, GrantPurpose, GrantSelection, PermissionMode,
 };
@@ -15,6 +14,7 @@ use gesang_core::{
     Admission, CommandRequirements, Error, GrantRequirement, PayloadKey, PreviousWriter,
     RequiredAuthority, Store, VerifiedIdentity,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 use sqlx::{
     Executor, Row,
@@ -65,7 +65,7 @@ async fn host_transaction_holds_authority_until_commit_and_preserves_control_aft
         .unwrap();
     let agent = store.ensure_agent(&owner, "engine", "local").await.unwrap();
     let claim = store
-        .claim_runtime(agent.id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(agent.id, Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap();
     let runtime = store
@@ -306,14 +306,14 @@ async fn identity_authorization_and_deduplicated_delivery_survive_reopening() {
     );
     let claimant = Uuid::new_v4();
     let pending = store
-        .claim_command(claimant, TimeDelta::minutes(1))
+        .claim_command(claimant, SignedDuration::from_mins(1))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(pending.command, submission.command);
     assert!(
         store
-            .claim_command(Uuid::new_v4(), TimeDelta::minutes(1))
+            .claim_command(Uuid::new_v4(), SignedDuration::from_mins(1))
             .await
             .unwrap()
             .is_none()
@@ -408,17 +408,17 @@ async fn expired_wake_attempt_cannot_settle_a_new_claim_even_if_claimant_is_reus
         .ensure_agent(&owner, "execution-v1", "local")
         .await
         .unwrap();
-    store.schedule(agent.id, Utc::now()).await.unwrap();
+    store.schedule(agent.id, Timestamp::now()).await.unwrap();
     let claimant = Uuid::new_v4();
     let old = store
-        .claim_wake(claimant, TimeDelta::minutes(1))
+        .claim_wake(claimant, SignedDuration::from_mins(1))
         .await
         .unwrap()
         .unwrap();
     sqlx::query("UPDATE gesang_wakes SET claimed_until=clock_timestamp()-interval '1 second' WHERE agent_id=$1")
         .bind(agent.id).execute(store.pool()).await.unwrap();
     let current = store
-        .claim_wake(claimant, TimeDelta::minutes(1))
+        .claim_wake(claimant, SignedDuration::from_mins(1))
         .await
         .unwrap()
         .unwrap();
@@ -452,7 +452,7 @@ async fn anchor_reconciles_prepared_commits_without_accepting_old_or_unexplained
         .await
         .unwrap();
     let claim = store
-        .claim_runtime(agent.id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(agent.id, Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap();
     let runtime = store
@@ -663,7 +663,7 @@ async fn every_acknowledged_mutation_forces_sync_commit_despite_unsafe_session_d
         .await
         .unwrap();
     let pending = store
-        .claim_command(Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_command(Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap()
         .unwrap();
@@ -675,13 +675,16 @@ async fn every_acknowledged_mutation_forces_sync_commit_despite_unsafe_session_d
         .await
         .unwrap();
     let wake = store
-        .claim_wake(Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_wake(Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap()
         .unwrap();
-    store.settle_wake(&wake, Some(Utc::now())).await.unwrap();
+    store
+        .settle_wake(&wake, Some(Timestamp::now()))
+        .await
+        .unwrap();
     let claim = store
-        .claim_runtime(agent.id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(agent.id, Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap();
     let runtime = store
@@ -726,7 +729,7 @@ async fn stale_controller_cannot_admit_without_independent_fencing_evidence() {
         .await
         .unwrap();
     let first = store
-        .claim_runtime(agent.id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(agent.id, Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap();
     store.verify_runtime_claim(&first).await.unwrap();
@@ -737,7 +740,7 @@ async fn stale_controller_cannot_admit_without_independent_fencing_evidence() {
         Err(Error::StaleGeneration)
     ));
     let mut expired = first.clone();
-    expired.expires_at = Utc::now() - TimeDelta::seconds(1);
+    expired.expires_at = Timestamp::now() - SignedDuration::from_secs(1);
     assert!(matches!(
         store.verify_runtime_claim(&expired).await,
         Err(Error::StaleGeneration)
@@ -770,7 +773,7 @@ async fn stale_controller_cannot_admit_without_independent_fencing_evidence() {
     }
     assert!(matches!(
         store
-            .claim_runtime(agent.id, Uuid::new_v4(), TimeDelta::minutes(1))
+            .claim_runtime(agent.id, Uuid::new_v4(), SignedDuration::from_mins(1))
             .await,
         Err(Error::StaleGeneration)
     ));
@@ -782,7 +785,7 @@ async fn stale_controller_cannot_admit_without_independent_fencing_evidence() {
     .await
     .unwrap();
     let next = store
-        .claim_runtime(agent.id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(agent.id, Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap();
     assert!(next.generation > first.generation);
@@ -845,7 +848,7 @@ async fn overlapping_physical_workspaces_cannot_be_bound_across_owners() {
         .await
         .unwrap();
     let claim = store
-        .claim_runtime(first.id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(first.id, Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap();
     let first_keys = vec!["deployment/pvc-a".into(), "deployment/pvc-b".into()];
@@ -918,7 +921,7 @@ async fn overlapping_physical_workspaces_cannot_be_bound_across_owners() {
         Err(Error::VersionConflict)
     ));
     let mut current = store
-        .claim_runtime(first.id, claim.controller_id, TimeDelta::minutes(1))
+        .claim_runtime(first.id, claim.controller_id, SignedDuration::from_mins(1))
         .await
         .unwrap();
     store.verify_runtime_claim(&current).await.unwrap();
@@ -944,13 +947,13 @@ async fn concurrent_new_work_cannot_be_erased_by_an_old_wake_receipt() {
         .ensure_agent(&owner, "execution-v1", "local")
         .await
         .unwrap();
-    store.schedule(agent.id, Utc::now()).await.unwrap();
+    store.schedule(agent.id, Timestamp::now()).await.unwrap();
     let claim = store
-        .claim_wake(Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_wake(Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap()
         .unwrap();
-    store.schedule(agent.id, Utc::now()).await.unwrap();
+    store.schedule(agent.id, Timestamp::now()).await.unwrap();
     store.settle_wake(&claim, None).await.unwrap();
     let current = sqlx::query("SELECT revision FROM gesang_wakes WHERE agent_id=$1")
         .bind(agent.id)
@@ -959,14 +962,14 @@ async fn concurrent_new_work_cannot_be_erased_by_an_old_wake_receipt() {
         .unwrap();
     assert!(current.get::<i64, _>("revision") > claim.revision);
     let retry = store
-        .claim_wake(Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_wake(Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap()
         .unwrap();
     store.settle_wake(&retry, None).await.unwrap();
     assert!(
         store
-            .claim_wake(Uuid::new_v4(), TimeDelta::minutes(1))
+            .claim_wake(Uuid::new_v4(), SignedDuration::from_mins(1))
             .await
             .unwrap()
             .is_none()
@@ -1011,7 +1014,7 @@ async fn sqlite_delivery_retains_original_request_and_rejects_stale_attempts() {
         .await
         .unwrap();
     assert_eq!(pending.state, gesang_api::DeliveryState::Pending);
-    let lease = TimeDelta::minutes(1);
+    let lease = SignedDuration::from_mins(1);
     let wake = store
         .claim_wake(Uuid::new_v4(), lease)
         .await
@@ -1032,7 +1035,7 @@ async fn sqlite_delivery_retains_original_request_and_rejects_stale_attempts() {
             .is_none()
     );
     store
-        .defer_command(&first, Utc::now() - TimeDelta::milliseconds(1))
+        .defer_command(&first, Timestamp::now() - SignedDuration::from_millis(1))
         .await
         .unwrap();
     let second = store

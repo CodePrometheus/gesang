@@ -81,7 +81,7 @@ impl TokenResponse {
                 i64::try_from(seconds)
                     .ok()
                     .and_then(|s| s.checked_mul(1000))
-                    .and_then(|ms| chrono::Utc::now().timestamp_millis().checked_add(ms))
+                    .and_then(|ms| crate::unix_milliseconds(jiff::Timestamp::now()).checked_add(ms))
                     .ok_or(ClientError::InvalidResponse)
             })
             .transpose()?;

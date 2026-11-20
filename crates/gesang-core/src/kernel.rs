@@ -3,8 +3,8 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use chrono::{TimeDelta, Utc};
 use gesang_api::{ApiProblem, CommandAuthorization, CommandReceipt, CommandSubmission};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -21,16 +21,16 @@ use crate::{
 pub struct RuntimePolicy {
     /// Controller lease and corresponding provider retention interval.
     #[serde(rename = "leaseMs", with = "duration_ms")]
-    pub lease: TimeDelta,
+    pub lease: SignedDuration,
     /// Maximum ownership interval for one delivery or wake attempt before reconciliation.
     #[serde(rename = "deliveryLeaseMs", with = "duration_ms")]
-    pub delivery_lease: TimeDelta,
+    pub delivery_lease: SignedDuration,
     /// Earliest next attempt after uncertain transport or provider results.
     #[serde(rename = "retryDelayMs", with = "duration_ms")]
-    pub retry_delay: TimeDelta,
+    pub retry_delay: SignedDuration,
     /// Persistent recovery deadline, shorter than the controller lease.
     #[serde(rename = "recoveryIntervalMs", with = "duration_ms")]
-    pub recovery_interval: TimeDelta,
+    pub recovery_interval: SignedDuration,
 }
 
 impl RuntimePolicy {
@@ -42,9 +42,9 @@ impl RuntimePolicy {
             self.retry_delay,
             self.recovery_interval,
         ] {
-            if duration.num_milliseconds() <= 0
-                || TimeDelta::try_milliseconds(duration.num_milliseconds()) != Some(duration)
-                || Utc::now().checked_add_signed(duration).is_none()
+            if duration.as_millis() <= 0
+                || duration.subsec_nanos() % 1_000_000 != 0
+                || Timestamp::now().checked_add(duration).is_err()
             {
                 return Err(Error::InvalidCommand(
                     "runtime policy durations must be positive exact milliseconds with representable deadlines".into(),
@@ -78,22 +78,59 @@ impl Configuration for RuntimePolicy {
 }
 
 mod duration_ms {
-    use chrono::TimeDelta;
+    use jiff::SignedDuration;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub(super) fn serialize<S: Serializer>(
-        value: &TimeDelta,
+        value: &SignedDuration,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_i64(value.num_milliseconds())
+        let millis = i64::try_from(value.as_millis()).map_err(serde::ser::Error::custom)?;
+        if millis == i64::MIN {
+            return Err(serde::ser::Error::custom("duration is out of range"));
+        }
+        serializer.serialize_i64(millis)
     }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> std::result::Result<TimeDelta, D::Error> {
+    ) -> std::result::Result<SignedDuration, D::Error> {
         let value = i64::deserialize(deserializer)?;
-        TimeDelta::try_milliseconds(value)
-            .ok_or_else(|| serde::de::Error::custom("duration is out of range"))
+        if value == i64::MIN {
+            return Err(serde::de::Error::custom("duration is out of range"));
+        }
+        Ok(SignedDuration::from_millis(value))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod timing_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn runtime_policy_keeps_signed_integer_milliseconds() {
+        let mut fixture = json!({
+            "leaseMs": 60000,
+            "deliveryLeaseMs": 10000,
+            "retryDelayMs": -1,
+            "recoveryIntervalMs": 5000,
+        });
+        let policy: RuntimePolicy = serde_json::from_value(fixture.clone()).unwrap();
+        assert_eq!(policy.retry_delay, SignedDuration::from_millis(-1));
+        assert_eq!(serde_json::to_value(&policy).unwrap(), fixture);
+        assert!(policy.validate().is_err());
+
+        fixture["retryDelayMs"] = json!(i64::MIN);
+        assert!(serde_json::from_value::<RuntimePolicy>(fixture.clone()).is_err());
+
+        fixture["retryDelayMs"] = json!(250);
+        let mut policy: RuntimePolicy = serde_json::from_value(fixture.clone()).unwrap();
+        assert!(policy.validate().is_ok());
+        policy.retry_delay += SignedDuration::from_nanos(1);
+        assert!(policy.validate().is_err());
+        assert_eq!(serde_json::to_value(policy).unwrap(), fixture);
     }
 }
 
@@ -493,7 +530,7 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
         let result = self.deliver(&command, &policy).await;
         if result.is_err() {
             self.store
-                .defer_command(&command, Utc::now() + policy.retry_delay)
+                .defer_command(&command, Timestamp::now() + policy.retry_delay)
                 .await?;
         }
         result?;
@@ -548,7 +585,10 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
         }
         self.store.verify_generation(&runtime).await?;
         self.store
-            .schedule(command.agent_id, Utc::now() + policy.recovery_interval)
+            .schedule(
+                command.agent_id,
+                Timestamp::now() + policy.recovery_interval,
+            )
             .await?;
         let dispatch = Dispatch {
             request_id: command.request_id,
@@ -581,7 +621,7 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
             Ok(next) => self.store.settle_wake(&claim, next).await?,
             Err(error) => {
                 self.store
-                    .settle_wake(&claim, Some(Utc::now() + policy.retry_delay))
+                    .settle_wake(&claim, Some(Timestamp::now() + policy.retry_delay))
                     .await?;
                 return Err(error);
             }
@@ -593,12 +633,12 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
         &self,
         agent_id: Uuid,
         policy: &RuntimePolicy,
-    ) -> Result<Option<chrono::DateTime<Utc>>> {
+    ) -> Result<Option<Timestamp>> {
         let runtime = self.ensure_runtime_with_policy(agent_id, policy).await?;
         self.store.verify_generation(&runtime).await?;
         self.engine.resume(&runtime).await?;
         let wake = self.engine.wake(&runtime).await?;
-        let recovery = Utc::now() + policy.recovery_interval;
+        let recovery = Timestamp::now() + policy.recovery_interval;
         let next = if wake.active {
             Some(wake.at.map_or(recovery, |at| at.min(recovery)))
         } else {

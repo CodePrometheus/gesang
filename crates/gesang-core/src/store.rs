@@ -2,11 +2,11 @@ pub(crate) mod database;
 
 use std::{path::Path, sync::Arc};
 
-use chrono::{DateTime, TimeDelta, Utc};
 use gesang_api::{
     Agent, ApiProblem, CapabilityScope, CommandAuthorization, CommandReceipt, CommandSubmission,
     DeliveryState, Grant, GrantPurpose, GrantSelection, PermissionMode, SessionSnapshot,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, SqlitePool};
@@ -648,7 +648,7 @@ impl Store {
     pub async fn claim_command(
         &self,
         claimant: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<Option<PendingCommand>> {
         let duration_ms = positive_duration(duration)?;
         let mut tx = self.database.begin().await?;
@@ -731,11 +731,7 @@ impl Store {
     }
 
     /// Retains original command identity and schedules reconciliation after an uncertain attempt.
-    pub async fn defer_command(
-        &self,
-        command: &PendingCommand,
-        due_at: DateTime<Utc>,
-    ) -> Result<()> {
+    pub async fn defer_command(&self, command: &PendingCommand, due_at: Timestamp) -> Result<()> {
         let mut tx = self.database.begin().await?;
         query(tx.executor(), "UPDATE gesang_commands SET delivery_owner=NULL,delivery_until=$1 WHERE request_id=$2 AND state='pending' AND delivery_owner=$3")
     .bind_timestamp(due_at)
@@ -748,7 +744,7 @@ impl Store {
     }
 
     /// Persists the earliest recovery deadline and invalidates stale wake receipts.
-    pub async fn schedule(&self, agent_id: Uuid, due_at: DateTime<Utc>) -> Result<()> {
+    pub async fn schedule(&self, agent_id: Uuid, due_at: Timestamp) -> Result<()> {
         let mut tx = self.database.begin().await?;
         schedule(&mut tx.coordination(), agent_id, Some(due_at)).await?;
         tx.commit().await?;
@@ -760,7 +756,7 @@ impl Store {
         &self,
         runtime: &Runtime,
         wake: &Wake,
-        recovery_interval: TimeDelta,
+        recovery_interval: SignedDuration,
     ) -> Result<()> {
         positive_duration(recovery_interval)?;
         let mut tx = self.database.begin().await?;
@@ -770,7 +766,7 @@ impl Store {
             .await?
             .timestamp("now")?;
         let due = if wake.active {
-            let recovery = now.checked_add_signed(recovery_interval).ok_or_else(|| {
+            let recovery = now.checked_add(recovery_interval).map_err(|_| {
                 Error::InvalidCommand("recovery deadline exceeds the clock range".into())
             })?;
             Some(wake.at.map_or(recovery, |at| at.min(recovery)))
@@ -788,7 +784,7 @@ impl Store {
     pub async fn claim_wake(
         &self,
         claimant: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<Option<WakeClaim>> {
         let mut tx = self.database.begin().await?;
         let row = query(tx.executor(), statement!("UPDATE gesang_wakes SET claimed_by=$1,claimed_until=", (lease 2), ",revision=revision+1 WHERE agent_id=(SELECT agent_id FROM gesang_wakes WHERE due_at<=", clock, " AND (claimed_until IS NULL OR claimed_until<=", clock, ") ORDER BY due_at,agent_id", [" FOR UPDATE SKIP LOCKED", ""], " LIMIT 1) RETURNING agent_id,revision"))
@@ -809,7 +805,7 @@ impl Store {
     }
 
     /// Updates or consumes a wake only if no newer work or claimant superseded it.
-    pub async fn settle_wake(&self, claim: &WakeClaim, next: Option<DateTime<Utc>>) -> Result<()> {
+    pub async fn settle_wake(&self, claim: &WakeClaim, next: Option<Timestamp>) -> Result<()> {
         let mut tx = self.database.begin().await?;
         match next {
             Some(next) => {
@@ -841,7 +837,7 @@ impl Store {
         &self,
         agent_id: Uuid,
         controller_id: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<RuntimeClaim> {
         let millis = positive_duration(duration)?;
         let mut tx = self.database.begin().await?;
@@ -858,7 +854,7 @@ impl Store {
         .fetch_optional()
         .await?
         .ok_or(Error::NotFound)?;
-        let observed_now: DateTime<Utc> = row.timestamp("observed_now")?;
+        let observed_now: Timestamp = row.timestamp("observed_now")?;
         let revoked: bool = query_scalar(tx.executor(), "SELECT EXISTS(SELECT 1 FROM gesang_custody c WHERE c.agent_id=$1 AND c.active_version IS NULL AND NOT (c.revision=0 AND EXISTS(SELECT 1 FROM gesang_initializations i WHERE i.agent_id=c.agent_id AND i.state='pending')))")
     .bind(agent_id)
     .fetch_one().await?;
@@ -1038,7 +1034,7 @@ pub(crate) async fn read_binding(
 pub(crate) async fn schedule(
     tx: &mut CoordinationTransaction<'_, '_>,
     agent_id: Uuid,
-    due_at: Option<DateTime<Utc>>,
+    due_at: Option<Timestamp>,
 ) -> Result<()> {
     query(
         tx.executor(),
@@ -1128,14 +1124,15 @@ fn purpose_str(purpose: GrantPurpose) -> &'static str {
     }
 }
 
-pub(crate) fn positive_duration(duration: TimeDelta) -> Result<i64> {
-    let millis = duration.num_milliseconds();
-    if millis <= 0 {
-        return Err(Error::InvalidCommand(
-            "lease duration must be positive".into(),
-        ));
-    }
-    Ok(millis)
+pub(crate) fn positive_duration(duration: SignedDuration) -> Result<i64> {
+    i64::try_from(duration.as_millis())
+        .ok()
+        .filter(|&millis| millis > 0)
+        .ok_or_else(|| {
+            Error::InvalidCommand(
+                "lease duration must be positive and fit in i64 milliseconds".into(),
+            )
+        })
 }
 
 fn command_aad(agent_id: Uuid, request_id: Uuid) -> Vec<u8> {

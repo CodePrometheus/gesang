@@ -4,9 +4,9 @@ mod store;
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use gesang_core::{InstalledPlugin, ResourceBinding, Store};
 use gesang_plugins::ServiceEndpoint;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, watch};
 use uuid::Uuid;
@@ -584,7 +584,7 @@ impl Sandbox for ContainerSandbox {
             profile: instance.profile,
             state,
             stopping: instance.stop_requested && instance.removal != Removal::Stopped,
-            observed_at: Utc::now(),
+            observed_at: Timestamp::now(),
         })
     }
 

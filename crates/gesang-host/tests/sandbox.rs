@@ -12,7 +12,6 @@ use std::{
     time::Duration,
 };
 
-use chrono::{TimeDelta, Utc};
 use gesang_core::{
     ConfigurationAccess, ConfigurationChange, ConfigurationKey, InstalledPlugin, PayloadKey,
     PluginCatalog, ServiceSelection, Store, VerifiedIdentity,
@@ -28,6 +27,7 @@ use gesang_services::{
     SandboxState, SandboxView, ServiceAccess, authentication_interface, create_scope,
     observe_scope, sandbox_interface, stop_scope,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{
@@ -254,7 +254,7 @@ async fn lifecycle() {
             observe_scope(),
             stop_scope(),
         ]),
-        expires_at: Utc::now() + TimeDelta::hours(1),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(1),
     };
     let (authorization, credential) = access.issue(&grant).await.unwrap();
     let mut foreign = grant.clone();
@@ -704,7 +704,7 @@ async fn process_recovery() {
             observe_scope(),
             stop_scope(),
         ]),
-        expires_at: Utc::now() + TimeDelta::hours(1),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(1),
     };
     let (authorization, credential) = access.issue(&grant).await.unwrap();
     let gateway = SandboxGateway::new(

@@ -1,8 +1,8 @@
 //! Business operations that a host supplies to the coordination kernel.
 
 use async_trait::async_trait;
-use chrono::{DateTime, TimeDelta, Utc};
 use gesang_api::{Agent, ApiProblem, CapabilityScope, CommandReceipt, CommandSubmission, Grant};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -36,7 +36,7 @@ pub trait CoordinationStore: Send + Sync {
     async fn claim_command(
         &self,
         claimant: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<Option<PendingCommand>>;
 
     /// Commits the original receipt only for the current attempt.
@@ -46,7 +46,7 @@ pub trait CoordinationStore: Send + Sync {
     async fn reject_command(&self, command: &PendingCommand, problem: &ApiProblem) -> Result<()>;
 
     /// Preserves uncertain work and schedules its original request for reconciliation.
-    async fn defer_command(&self, command: &PendingCommand, due_at: DateTime<Utc>) -> Result<()>;
+    async fn defer_command(&self, command: &PendingCommand, due_at: Timestamp) -> Result<()>;
 
     /// Verifies the current task delegation, its exact revision, and required scopes.
     async fn authorize(
@@ -62,7 +62,7 @@ pub trait CoordinationStore: Send + Sync {
         &self,
         agent_id: Uuid,
         controller_id: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<RuntimeClaim>;
 
     /// Reads the instance intent for the current controller claim.
@@ -111,7 +111,7 @@ pub trait CoordinationStore: Send + Sync {
     async fn claim_retirement(
         &self,
         claimant: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<Option<RuntimeRetirement>>;
 
     /// Requires a current, unchanged retirement attempt.
@@ -121,13 +121,17 @@ pub trait CoordinationStore: Send + Sync {
     async fn finish_retirement(&self, retirement: &RuntimeRetirement) -> Result<()>;
 
     /// Claims due recovery work with a new attempt revision.
-    async fn claim_wake(&self, claimant: Uuid, duration: TimeDelta) -> Result<Option<WakeClaim>>;
+    async fn claim_wake(
+        &self,
+        claimant: Uuid,
+        duration: SignedDuration,
+    ) -> Result<Option<WakeClaim>>;
 
     /// Persists the earliest due time and invalidates an older wake attempt.
-    async fn schedule(&self, agent_id: Uuid, due_at: DateTime<Utc>) -> Result<()>;
+    async fn schedule(&self, agent_id: Uuid, due_at: Timestamp) -> Result<()>;
 
     /// Settles the exact wake revision without erasing newer work.
-    async fn settle_wake(&self, claim: &WakeClaim, next: Option<DateTime<Utc>>) -> Result<()>;
+    async fn settle_wake(&self, claim: &WakeClaim, next: Option<Timestamp>) -> Result<()>;
 }
 
 #[async_trait]
@@ -149,7 +153,7 @@ impl CoordinationStore for Store {
     async fn claim_command(
         &self,
         claimant: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<Option<PendingCommand>> {
         Store::claim_command(self, claimant, duration).await
     }
@@ -162,7 +166,7 @@ impl CoordinationStore for Store {
         Store::reject_command(self, command, problem).await
     }
 
-    async fn defer_command(&self, command: &PendingCommand, due_at: DateTime<Utc>) -> Result<()> {
+    async fn defer_command(&self, command: &PendingCommand, due_at: Timestamp) -> Result<()> {
         Store::defer_command(self, command, due_at).await
     }
 
@@ -180,7 +184,7 @@ impl CoordinationStore for Store {
         &self,
         agent_id: Uuid,
         controller_id: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<RuntimeClaim> {
         Store::claim_runtime(self, agent_id, controller_id, duration).await
     }
@@ -238,7 +242,7 @@ impl CoordinationStore for Store {
     async fn claim_retirement(
         &self,
         claimant: Uuid,
-        duration: TimeDelta,
+        duration: SignedDuration,
     ) -> Result<Option<RuntimeRetirement>> {
         Store::claim_retirement(self, claimant, duration).await
     }
@@ -251,15 +255,19 @@ impl CoordinationStore for Store {
         Store::finish_retirement(self, retirement).await
     }
 
-    async fn claim_wake(&self, claimant: Uuid, duration: TimeDelta) -> Result<Option<WakeClaim>> {
+    async fn claim_wake(
+        &self,
+        claimant: Uuid,
+        duration: SignedDuration,
+    ) -> Result<Option<WakeClaim>> {
         Store::claim_wake(self, claimant, duration).await
     }
 
-    async fn schedule(&self, agent_id: Uuid, due_at: DateTime<Utc>) -> Result<()> {
+    async fn schedule(&self, agent_id: Uuid, due_at: Timestamp) -> Result<()> {
         Store::schedule(self, agent_id, due_at).await
     }
 
-    async fn settle_wake(&self, claim: &WakeClaim, next: Option<DateTime<Utc>>) -> Result<()> {
+    async fn settle_wake(&self, claim: &WakeClaim, next: Option<Timestamp>) -> Result<()> {
         Store::settle_wake(self, claim, next).await
     }
 }

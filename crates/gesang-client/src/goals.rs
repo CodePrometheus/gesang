@@ -107,7 +107,8 @@ pub struct GoalPageView {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct CachedGoal {
     snapshot: GoalSnapshot,
-    synchronized_at: chrono::DateTime<chrono::Utc>,
+    #[serde(serialize_with = "gesang_api::timestamp::serialize")]
+    synchronized_at: jiff::Timestamp,
 }
 
 #[derive(Default, Debug)]
@@ -131,7 +132,7 @@ impl GoalCache {
         }
         let cached = CachedGoal {
             snapshot,
-            synchronized_at: chrono::Utc::now(),
+            synchronized_at: jiff::Timestamp::now(),
         };
         let view = cached.view();
         goals.insert(key, cached);
@@ -142,7 +143,7 @@ impl GoalCache {
 impl CachedGoal {
     fn view(&self) -> GoalView {
         let mut view = GoalView::from(self.snapshot.clone());
-        view.synchronized_at_ms = self.synchronized_at.timestamp_millis();
+        view.synchronized_at_ms = crate::unix_milliseconds(self.synchronized_at);
         view
     }
 }
@@ -199,7 +200,7 @@ impl From<GoalSnapshot> for GoalView {
             result_summary,
             evidence,
             updated_at_ms: value.updated_at,
-            synchronized_at_ms: chrono::Utc::now().timestamp_millis(),
+            synchronized_at_ms: crate::unix_milliseconds(jiff::Timestamp::now()),
         }
     }
 }

@@ -430,7 +430,7 @@ async fn sqlite_reopens_original_operation_and_fences_new_execution() {
             .await
             .unwrap();
     let claim = reopened
-        .claim_runtime(agent.id, controller, TimeDelta::minutes(1))
+        .claim_runtime(agent.id, controller, SignedDuration::from_mins(1))
         .await
         .unwrap();
     let replacement = reopened.advance_fenced_generation(&claim).await.unwrap();

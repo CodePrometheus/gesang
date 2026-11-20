@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use gesang_api::CapabilityScope;
+use gesang_core::PostgresTimestamp;
 use gesang_plugins::{BindingScope, PrincipalId};
 use sqlx::{PgPool, Postgres, Transaction, types::Json};
 use uuid::Uuid;
@@ -34,7 +35,7 @@ pub(super) async fn insert(
         Json(grant.binding) as _,
         Json(grant.principal) as _,
         Json(&grant.scopes) as _,
-        grant.expires_at,
+        PostgresTimestamp(grant.expires_at) as _,
     )
     .execute(&mut **transaction)
     .await?;

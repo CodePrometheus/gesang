@@ -1,11 +1,11 @@
 //! Actual credential possession, grant changes, and transactional revocation ordering.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use chrono::{TimeDelta, Utc};
 use gesang_api::CapabilityScope;
 use gesang_core::{PayloadKey, Store, VerifiedIdentity};
 use gesang_plugins::{Authority, BindingScope, PrincipalId, ResourceScope};
 use gesang_services::{Caller, Credential, CredentialGrant, Error, ServiceAccess};
+use jiff::{SignedDuration, Timestamp};
 use sqlx::{
     Executor,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -54,7 +54,7 @@ fn grant() -> CredentialGrant {
             service_id: Uuid::new_v4(),
         },
         scopes: BTreeSet::from([scope("create"), scope("observe"), scope("stop")]),
-        expires_at: Utc::now() + TimeDelta::hours(1),
+        expires_at: Timestamp::now() + SignedDuration::from_hours(1),
     }
 }
 
@@ -293,10 +293,10 @@ async fn credential_expiry() {
     let store = store().await;
     let access = ServiceAccess::new(store.clone());
     let mut grant = grant();
-    grant.expires_at = Utc::now() - TimeDelta::seconds(1);
+    grant.expires_at = Timestamp::now() - SignedDuration::from_secs(1);
     assert!(matches!(access.issue(&grant).await, Err(Error::Invalid(_))));
     // This short lifetime is explicit test input, not a production default or assertion timeout.
-    grant.expires_at = Utc::now() + TimeDelta::seconds(1);
+    grant.expires_at = Timestamp::now() + SignedDuration::from_secs(1);
     let (reference, secret) = access.issue(&grant).await.unwrap();
     while !sqlx::query_scalar::<_, bool>(
         "SELECT expires_at<=clock_timestamp() FROM gesang_service_credentials WHERE id=$1",

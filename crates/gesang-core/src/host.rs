@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use gesang_api::{Agent, ApiProblem, CapabilityScope, CommandAuthorization};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -68,7 +68,7 @@ pub struct RuntimeClaim {
     /// Generation allocated by the transactional store.
     pub generation: i64,
     /// Database-observed lease deadline.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     /// Previous admitted writer requiring independent fencing evidence.
     pub previous: Option<Runtime>,
 }
@@ -125,7 +125,7 @@ pub struct Wake {
     /// Runnable, running, or still-recovering execution exists.
     pub active: bool,
     /// Earliest absolute deadline reported by the execution authority.
-    pub at: Option<DateTime<Utc>>,
+    pub at: Option<Timestamp>,
 }
 
 /// Nonblocking storage restoration status while the controller keeps renewing its lease.
@@ -197,7 +197,7 @@ pub trait InstanceProvider: Send + Sync {
     /// Distinguishes a verified stopped instance from unavailable observations.
     async fn observe(&self, runtime: &Runtime) -> Result<InstanceObservation>;
     /// Protects an instance from host reclamation until the supplied deadline.
-    async fn retain_until(&self, runtime: &Runtime, until: DateTime<Utc>) -> Result<()>;
+    async fn retain_until(&self, runtime: &Runtime, until: Timestamp) -> Result<()>;
     /// Requests and verifies a safe stop, preserving persistent execution records.
     async fn stop(&self, runtime: &Runtime) -> Result<()>;
     /// Stops and independently verifies every launch through the retirement generation.

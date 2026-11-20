@@ -8,7 +8,6 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{Engine as _, prelude::BASE64_URL_SAFE_NO_PAD};
-use chrono::TimeDelta;
 use gesang_api::CapabilityScope;
 use gesang_core::{
     Admission, AgentBinding, Custody, CustodyEnrollment, CustodyKey, Error, InstancePhase,
@@ -16,6 +15,7 @@ use gesang_core::{
     ServiceKey, ServiceKeyVerifier, Store, VerifiedIdentity,
 };
 use gesang_host::{ControlKey, ControlPlane, ControlPolicy, ExecutionAction};
+use jiff::SignedDuration;
 use serde_json::{Value, json};
 use sqlx::{
     Executor,
@@ -172,7 +172,7 @@ impl Fixture {
             .claim_runtime(
                 agent.id,
                 Uuid::new_v4(),
-                TimeDelta::from_std(deadline).unwrap(),
+                SignedDuration::try_from(deadline).unwrap(),
             )
             .await
             .unwrap();
@@ -236,7 +236,7 @@ impl Fixture {
             Arc::new(Policy {
                 migration_checks: migration_checks.clone(),
             }),
-            TimeDelta::seconds(10),
+            SignedDuration::from_secs(10),
         )
         .unwrap()
         .with_migration_custody(custody);
@@ -359,7 +359,7 @@ impl Fixture {
             .claim_runtime(
                 old.agent_id,
                 Uuid::new_v4(),
-                TimeDelta::from_std(self.deadline).unwrap(),
+                SignedDuration::try_from(self.deadline).unwrap(),
             )
             .await
             .unwrap();

@@ -16,18 +16,18 @@ base64 = "0.23.1"
 chopin-protocol = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "91251b63ed9beb2842b0d8bdaa7a07b792401902", version = "=0.7.0-rc2" }
 chopin-job-broker = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "6d90c60e8314ef72588b3f703dca60355029220a", version = "=0.7.0-rc2", features = ["transport"] }
 chacha20poly1305 = "0.11.0"
-chrono = { version = "0.4.45", features = ["serde"] }
 getrandom = "0.4.3"
 hmac = "0.13.0"
 hkdf = "0.13.0"
+jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }
 jsonschema = { version = "0.61.2", default-features = false, features = ["idna"] }
 serde = { version = "1.0.229", features = ["derive"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "json", "form", "query"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
-schemars = { version = "1.2.3", features = ["chrono04", "uuid1"] }
+schemars = { version = "1.2.3", features = ["jiff02", "uuid1"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "sqlite", "chrono", "uuid", "json", "migrate", "macros"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "sqlite", "uuid", "json", "migrate", "macros"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
 tower = { version = "0.5.3", features = ["util"] }

@@ -5,12 +5,12 @@
 mod host_coordination;
 
 use async_trait::async_trait;
-use chrono::{DateTime, TimeDelta, Utc};
 use gesang_core::{
     Activity, Admission, CommandRequirements, Dispatch, EngineBridge, ExecutionResponse,
     InstanceObservation, InstanceProvider, Kernel, PreviousWriter, Runtime, RuntimeClaim,
     RuntimePolicy, Wake,
 };
+use jiff::{SignedDuration, Timestamp};
 use std::sync::{Arc, Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -491,7 +491,7 @@ async fn live_policy_rejects_superseded_adoptions_and_ciphertext_substitution() 
 
 #[derive(Default)]
 struct Provider {
-    retained: Mutex<Vec<DateTime<Utc>>>,
+    retained: Mutex<Vec<Timestamp>>,
 }
 
 #[async_trait]
@@ -521,7 +521,7 @@ impl InstanceProvider for Provider {
     async fn observe(&self, _: &Runtime) -> Result<InstanceObservation> {
         Ok(InstanceObservation::Live(Activity::Waiting))
     }
-    async fn retain_until(&self, _: &Runtime, until: DateTime<Utc>) -> Result<()> {
+    async fn retain_until(&self, _: &Runtime, until: Timestamp) -> Result<()> {
         self.retained.lock().unwrap().push(until);
         Ok(())
     }
@@ -591,10 +591,10 @@ async fn assert_kernel_adopts_new_runtime_policy(fixture: Fixture) {
     });
     let scope = ConfigurationScope::Deployment;
     let policy = RuntimePolicy {
-        lease: TimeDelta::seconds(30),
-        delivery_lease: TimeDelta::seconds(10),
-        retry_delay: TimeDelta::seconds(1),
-        recovery_interval: TimeDelta::seconds(5),
+        lease: SignedDuration::from_secs(30),
+        delivery_lease: SignedDuration::from_secs(10),
+        retry_delay: SignedDuration::from_secs(1),
+        recovery_interval: SignedDuration::from_secs(5),
     };
     let mut first = ConfigurationChange {
         operation_id: Uuid::new_v4(),
@@ -640,7 +640,7 @@ async fn assert_kernel_adopts_new_runtime_policy(fixture: Fixture) {
     let before = provider.retained.lock().unwrap()[0];
     first.operation_id = Uuid::new_v4();
     first.expected_revision = Some(1);
-    first.values.lease = TimeDelta::seconds(90);
+    first.values.lease = SignedDuration::from_secs(90);
     fixture
         .center
         .prepare(&access, &scope, &first)
@@ -706,6 +706,6 @@ async fn assert_kernel_adopts_new_runtime_policy(fixture: Fixture) {
             .unwrap()
             .values
             .lease,
-        TimeDelta::seconds(90)
+        SignedDuration::from_secs(90)
     );
 }

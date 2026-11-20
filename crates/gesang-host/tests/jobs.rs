@@ -23,13 +23,13 @@ use chopin_job_broker::{
     Source, Stream, WorkerEndpoint, WorkerEvent, WorkerObservation, WorkerStart, WorkerState,
     WorkerTransport,
 };
-use chrono::TimeDelta;
 use gesang_api::{CapabilityScope, Grant, GrantPurpose, GrantSelection, PermissionMode};
 use gesang_core::{
     Admission, Error, InstancePhase, InstancePlan, InstancePurpose, InstanceRecord, Owner,
     PayloadKey, PreviousWriter, Runtime, Store, VerifiedIdentity,
 };
 use gesang_host::{JobAuthority, JobControlKey, JobPolicy};
+use jiff::SignedDuration;
 use sqlx::{
     Executor,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -161,7 +161,7 @@ async fn allocate(
     purpose: InstancePurpose,
 ) -> Runtime {
     let claim = store
-        .claim_runtime(agent_id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(agent_id, Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap();
     assert_eq!(claim.agent.owner_id, owner.id);

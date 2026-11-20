@@ -11,6 +11,7 @@ mod host;
 mod kernel;
 mod lifecycle;
 mod pins;
+mod postgres_timestamp;
 mod resources;
 mod store;
 
@@ -34,5 +35,6 @@ pub use lifecycle::{
     CompletedMigration, InstanceIntent, InstancePhase, InstancePlan, InstancePurpose,
     InstanceRecord, PreparationProgress,
 };
+pub use postgres_timestamp::PostgresTimestamp;
 pub use resources::ResourceBinding;
 pub use store::{CoordinationTransaction, GrantRequirement, PendingCommand, Store, WakeClaim};

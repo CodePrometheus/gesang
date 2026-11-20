@@ -1,6 +1,8 @@
 //! Platform contracts shared by hosts and clients; execution contracts remain upstream.
 
-use chrono::{DateTime, Utc};
+pub mod timestamp;
+
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -17,7 +19,8 @@ pub struct Agent {
     /// Execution adapter identifier.
     pub engine: String,
     /// Time the logical agent was registered.
-    pub created_at: DateTime<Utc>,
+    #[serde(serialize_with = "timestamp::serialize")]
+    pub created_at: Timestamp,
 }
 
 /// The owner's explicitly selected task permission policy.
@@ -75,7 +78,8 @@ pub struct Grant {
     /// Exact permitted scopes for a scoped policy.
     pub scopes: Vec<CapabilityScope>,
     /// Revocation time; an existing side effect is not undone by revocation.
-    pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "timestamp::serialize_optional")]
+    pub revoked_at: Option<Timestamp>,
 }
 
 /// An immutable request for at-least-once delivery to the execution authority.
@@ -272,5 +276,49 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn existing_timestamp_fields_round_trip_with_original_precision() {
+        for (input, expected) in [
+            ("1970-01-01T00:00:00Z", "1970-01-01T00:00:00Z"),
+            ("2026-11-20T16:00:00.120+08:00", "2026-11-20T08:00:00.120Z"),
+            (
+                "2026-11-20T16:00:00.120300+08:00",
+                "2026-11-20T08:00:00.120300Z",
+            ),
+            (
+                "1969-12-31T23:59:59.999999999Z",
+                "1969-12-31T23:59:59.999999999Z",
+            ),
+        ] {
+            let agent: Agent = serde_json::from_value(json!({
+                "id": Uuid::nil(), "ownerId": Uuid::nil(), "engine": "fixture", "createdAt": input
+            }))
+            .unwrap();
+            let mut grant: Grant = serde_json::from_value(json!({
+                "id": Uuid::nil(), "agentId": Uuid::nil(), "version": 1,
+                "mode": "ask", "scopes": [], "revokedAt": input
+            }))
+            .unwrap();
+            assert_eq!(agent.created_at, grant.revoked_at.unwrap());
+            assert_eq!(serde_json::to_value(agent).unwrap()["createdAt"], expected);
+            assert_eq!(serde_json::to_value(&grant).unwrap()["revokedAt"], expected);
+            grant.revoked_at = None;
+            assert!(serde_json::to_value(&grant).unwrap()["revokedAt"].is_null());
+        }
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn timestamp_schema_retains_string_format_and_nullability() {
+        let agent = schemars::schema_for!(Agent);
+        let grant = schemars::schema_for!(Grant);
+        let created = &agent.as_value()["properties"]["createdAt"];
+        let revoked = &grant.as_value()["properties"]["revokedAt"];
+        assert_eq!(created["type"], "string");
+        assert_eq!(created["format"], "date-time");
+        assert_eq!(revoked["type"], json!(["string", "null"]));
+        assert_eq!(revoked["format"], "date-time");
     }
 }

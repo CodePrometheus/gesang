@@ -20,7 +20,7 @@ bindgen = ["uniffi/cli"]
 [dependencies]
 gesang-api = { path = "../gesang-api" }
 chopin-protocol.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

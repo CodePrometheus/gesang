@@ -226,7 +226,7 @@ impl Client {
                         reasons: value.reasons,
                     })
                     .collect(),
-                synchronized_at_ms: chrono::Utc::now().timestamp_millis(),
+                synchronized_at_ms: crate::unix_milliseconds(jiff::Timestamp::now()),
             })
         }
         .await;

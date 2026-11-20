@@ -17,7 +17,6 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use base64::{Engine as _, prelude::BASE64_URL_SAFE_NO_PAD};
-use chrono::TimeDelta;
 use gesang_api::{CapabilityScope, GrantPurpose, GrantSelection, PermissionMode};
 use gesang_core::{
     Admission, AgentBinding, AnchorHead, Custody, CustodyKey, Error, Initialization,
@@ -25,6 +24,7 @@ use gesang_core::{
     InstancePurpose, Owner, PayloadKey, PreviousWriter, Result, Runtime, Store, VerifiedIdentity,
 };
 use gesang_host::{ControlKey, ControlPlane, ControlPolicy, ExecutionAction};
+use jiff::SignedDuration;
 use serde_json::{Value, json};
 use sqlx::{
     Executor,
@@ -138,7 +138,7 @@ impl Fixture {
     async fn allocate(&self, purpose: InstancePurpose) -> InstanceIntent {
         let claim = self
             .store
-            .claim_runtime(self.agent_id, Uuid::new_v4(), TimeDelta::minutes(1))
+            .claim_runtime(self.agent_id, Uuid::new_v4(), SignedDuration::from_mins(1))
             .await
             .unwrap();
         let intent = self
@@ -175,7 +175,7 @@ impl Fixture {
             self.store.clone(),
             self.control.clone(),
             self.policy.clone(),
-            TimeDelta::milliseconds(7),
+            SignedDuration::from_millis(7),
         )
         .unwrap()
         .with_initialization_custody(self.custody.clone())
@@ -456,7 +456,7 @@ async fn pending_initialization_admits_only_its_initializer_without_execution_au
     f.bind().await;
     let claim = f
         .store
-        .claim_runtime(f.agent_id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(f.agent_id, Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap();
     let mut plan = InstancePlan {

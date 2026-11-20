@@ -131,7 +131,9 @@ impl From<Grant> for GrantView {
             version: value.version,
             permission: value.mode.into(),
             scopes: value.scopes.into_iter().map(Into::into).collect(),
-            revoked_at: value.revoked_at.map(|v| v.to_rfc3339()),
+            revoked_at: value
+                .revoked_at
+                .map(|value| gesang_api::timestamp::display_with_utc_offset(value).to_string()),
         }
     }
 }
@@ -155,7 +157,7 @@ impl From<SessionSnapshot> for SessionView {
             owner_id: value.owner_id.to_string(),
             agent_id: value.agent.id.to_string(),
             grant: value.grant.map(Into::into),
-            synchronized_at_ms: chrono::Utc::now().timestamp_millis(),
+            synchronized_at_ms: crate::unix_milliseconds(jiff::Timestamp::now()),
         }
     }
 }

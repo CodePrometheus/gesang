@@ -10,11 +10,11 @@ repository.workspace = true
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
-chrono.workspace = true
 getrandom.workspace = true
 gesang-api = { path = "../gesang-api" }
 gesang-core = { path = "../gesang-core" }
 gesang-plugins = { path = "../gesang-plugins" }
+jiff.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 schemars.workspace = true

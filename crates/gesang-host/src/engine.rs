@@ -15,12 +15,12 @@ use chopin_protocol::{
     GoalCommand, GoalPage, GoalSnapshot, HeldChange, LoopChange, LoopSettings, LoopStanding,
     ModelChoices, ProtocolError, StateObserver, TranscriptPage,
 };
-use chrono::DateTime;
 use gesang_api::{ApiProblem, CommandAuthorization};
 use gesang_core::{
     CommandRequirements, Dispatch, EngineBridge, EnginePreparation, Error, ExecutionResponse,
     InstancePhase, InstancePurpose, RequiredAuthority, Result, Runtime, Store, Wake,
 };
+use jiff::Timestamp;
 use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use uuid::Uuid;
@@ -665,8 +665,8 @@ impl EngineBridge for EngineAdapter {
                         "engine wake timestamp is not an exact integer".into(),
                     ));
                 }
-                DateTime::from_timestamp_millis(at as i64)
-                    .ok_or_else(|| Error::Uncertain("engine wake timestamp is out of range".into()))
+                Timestamp::from_millisecond(at as i64)
+                    .map_err(|_| Error::Uncertain("engine wake timestamp is out of range".into()))
             })
             .transpose()?;
         Ok(Wake {

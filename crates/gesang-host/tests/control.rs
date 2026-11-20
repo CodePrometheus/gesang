@@ -22,7 +22,6 @@ use axum::{
 };
 use base64::{Engine as _, prelude::BASE64_URL_SAFE_NO_PAD};
 use chopin_protocol::{ChordClient, GoalCommand, GoalGrant};
-use chrono::{TimeDelta, Utc};
 use gesang_api::{
     CapabilityScope, CommandAuthorization, CommandSubmission, GrantPurpose, GrantSelection,
     PermissionMode,
@@ -37,6 +36,7 @@ use gesang_host::{
     ControlKey, ControlPlane, ControlPolicy, EngineAdapter, EngineConnectionPolicy,
     EngineConnector, ExecutionAction,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
 use sqlx::{
     Executor,
@@ -170,7 +170,7 @@ impl Fixture {
                 .unwrap();
         }
         let claim = store
-            .claim_runtime(agent.id, Uuid::new_v4(), TimeDelta::minutes(1))
+            .claim_runtime(agent.id, Uuid::new_v4(), SignedDuration::from_mins(1))
             .await
             .unwrap();
         let planned = store
@@ -203,7 +203,7 @@ impl Fixture {
             store.clone(),
             key.clone(),
             Arc::new(Policy),
-            TimeDelta::seconds(10),
+            SignedDuration::from_secs(10),
         )
         .unwrap();
         (
@@ -301,7 +301,11 @@ async fn replacement_writer_reconciles_original_pending_anchor_and_rejects_old_c
     .unwrap();
     let claim = fixture
         .store
-        .claim_runtime(old_runtime.agent_id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(
+            old_runtime.agent_id,
+            Uuid::new_v4(),
+            SignedDuration::from_mins(1),
+        )
         .await
         .unwrap();
     fixture.runtime = fixture
@@ -553,12 +557,12 @@ async fn owner_controls_survive_revocation_but_execution_never_bypasses_host_pol
 #[ignore = "requires a real isolated transactional database"]
 async fn wake_callbacks_preserve_earlier_work_and_fail_closed_on_database_outage() {
     let fixture = Fixture::new().await;
-    let due = Utc::now() - TimeDelta::seconds(1);
+    let due_ms = Timestamp::now().as_millisecond() - 1_000;
     assert_eq!(
         fixture
             .post(
                 "/internal/v1/wake",
-                json!({"wake":{"active":false,"at":due.timestamp_millis()}})
+                json!({"wake":{"active":false,"at":due_ms}})
             )
             .await
             .0,
@@ -578,13 +582,13 @@ async fn wake_callbacks_preserve_earlier_work_and_fail_closed_on_database_outage
             .0,
         StatusCode::NO_CONTENT
     );
-    let scheduled: chrono::DateTime<Utc> =
+    let scheduled: gesang_core::PostgresTimestamp =
         sqlx::query_scalar("SELECT due_at FROM gesang_wakes WHERE agent_id=$1")
             .bind(fixture.runtime.agent_id)
             .fetch_one(fixture.store.pool())
             .await
             .unwrap();
-    assert_eq!(scheduled.timestamp_millis(), due.timestamp_millis());
+    assert_eq!(scheduled.0, Timestamp::from_millisecond(due_ms).unwrap());
     assert_eq!(
         fixture
             .post(
@@ -979,7 +983,7 @@ async fn execution_key_requires_current_custody_writer_and_explicit_host_verific
         f.store.clone(),
         f.key.clone(),
         policy.clone(),
-        TimeDelta::seconds(10),
+        SignedDuration::from_secs(10),
     )
     .unwrap()
     .with_execution_custody(custody.clone());
@@ -1068,7 +1072,7 @@ async fn nonexecution_writers_never_receive_execution_keys() {
             f.store.clone(),
             f.key.clone(),
             Arc::new(ExecutionPolicy(AtomicBool::new(true))),
-            TimeDelta::seconds(10),
+            SignedDuration::from_secs(10),
         )
         .unwrap()
         .with_execution_custody(custody);
@@ -1129,7 +1133,7 @@ async fn migration_checks_host_fencing_on_every_action_and_never_receives_execut
         fixture.store.clone(),
         fixture.key.clone(),
         policy.clone(),
-        TimeDelta::seconds(10),
+        SignedDuration::from_secs(10),
     )
     .unwrap();
     assert_eq!(
@@ -1215,7 +1219,7 @@ async fn migration_key_handoff_requires_active_custody_current_writer_and_physic
         fixture.store.clone(),
         fixture.key.clone(),
         policy.clone(),
-        TimeDelta::seconds(10),
+        SignedDuration::from_secs(10),
     )
     .unwrap();
     assert_eq!(
@@ -1342,7 +1346,7 @@ async fn execution_and_unadmitted_migration_credentials_never_receive_migration_
         fixture.store.clone(),
         fixture.key.clone(),
         policy.clone(),
-        TimeDelta::seconds(10),
+        SignedDuration::from_secs(10),
     )
     .unwrap()
     .with_migration_custody(custody.clone());
@@ -1393,7 +1397,7 @@ async fn execution_and_unadmitted_migration_credentials_never_receive_migration_
         .claim_runtime(
             fixture.runtime.agent_id,
             starting.claim.controller_id,
-            TimeDelta::minutes(1),
+            SignedDuration::from_mins(1),
         )
         .await
         .unwrap();
@@ -1503,7 +1507,7 @@ async fn slow_unlock_does_not_block_lease_renewal_and_retirement_cancels_its_own
         .claim_runtime(
             intent.claim.agent.id,
             intent.claim.controller_id,
-            TimeDelta::minutes(1),
+            SignedDuration::from_mins(1),
         )
         .await
         .unwrap();

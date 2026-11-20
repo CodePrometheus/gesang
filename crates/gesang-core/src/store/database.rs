@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, path::Path};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use sqlx::{
     ColumnIndex, Decode, Encode, PgPool, Postgres, Row as _, Sqlite, SqlitePool, Type,
     postgres::{PgArguments, PgRow},
@@ -10,7 +10,7 @@ use sqlx::{
     },
 };
 
-use crate::{Error, Result};
+use crate::{Error, PostgresTimestamp, Result};
 
 #[derive(Clone, Debug)]
 pub(crate) enum Database {
@@ -299,16 +299,18 @@ impl Row {
             Self::Sqlite(row) => row.try_get(index),
         }
     }
-    pub(crate) fn timestamp(&self, column: &str) -> sqlx::Result<DateTime<Utc>> {
+    pub(crate) fn timestamp(&self, column: &str) -> sqlx::Result<Timestamp> {
         match self {
-            Self::Postgres(row) => row.try_get(column),
+            Self::Postgres(row) => row.try_get(column).map(|PostgresTimestamp(value)| value),
             Self::Sqlite(row) => sqlite_timestamp(column, row.try_get(column)?),
         }
     }
 
-    pub(crate) fn optional_timestamp(&self, column: &str) -> sqlx::Result<Option<DateTime<Utc>>> {
+    pub(crate) fn optional_timestamp(&self, column: &str) -> sqlx::Result<Option<Timestamp>> {
         match self {
-            Self::Postgres(row) => row.try_get(column),
+            Self::Postgres(row) => row
+                .try_get::<Option<PostgresTimestamp>, _>(column)
+                .map(|value| value.map(|PostgresTimestamp(time)| time)),
             Self::Sqlite(row) => row
                 .try_get::<Option<i64>, _>(column)?
                 .map(|value| sqlite_timestamp(column, value))
@@ -317,10 +319,10 @@ impl Row {
     }
 }
 
-fn sqlite_timestamp(column: &str, micros: i64) -> sqlx::Result<DateTime<Utc>> {
-    DateTime::from_timestamp_micros(micros).ok_or_else(|| sqlx::Error::ColumnDecode {
+fn sqlite_timestamp(column: &str, micros: i64) -> sqlx::Result<Timestamp> {
+    Timestamp::from_microsecond(micros).map_err(|source| sqlx::Error::ColumnDecode {
         index: column.into(),
-        source: std::io::Error::other("timestamp is out of range").into(),
+        source: source.into(),
     })
 }
 
@@ -379,16 +381,19 @@ impl Query<'_, '_> {
         }
     }
 
-    pub(crate) fn bind_timestamp(self, value: DateTime<Utc>) -> Self {
+    pub(crate) fn bind_timestamp(self, value: Timestamp) -> Self {
         self.bind_optional_timestamp(Some(value))
     }
 
-    pub(crate) fn bind_optional_timestamp(self, value: Option<DateTime<Utc>>) -> Self {
+    pub(crate) fn bind_optional_timestamp(self, value: Option<Timestamp>) -> Self {
         match self {
-            Self::Postgres(target, query) => Self::Postgres(target, query.bind(value)),
+            Self::Postgres(target, query) => {
+                Self::Postgres(target, query.bind(value.map(PostgresTimestamp)))
+            }
             Self::Sqlite(target, query) => Self::Sqlite(
                 target,
-                query.bind(value.map(|time| time.timestamp_micros())),
+                // SQLite stores Unix microseconds, flooring negative fractional values.
+                query.bind(value.map(|time| time.as_nanosecond().div_euclid(1_000) as i64)),
             ),
         }
     }
@@ -455,5 +460,80 @@ where
             .iter()
             .map(|row| row.try_get(0))
             .collect()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod timestamp_tests {
+    use super::*;
+
+    // Captured with the previous SQLite mapping and SQLx's Chrono PostgreSQL codec.
+    const LEGACY_TIMESTAMPS: [(&str, i64, &str); 4] = [
+        (
+            "1969-12-31T23:59:58.123456789Z",
+            -1_876_544,
+            "1969-12-31T23:59:58.123457Z",
+        ),
+        ("1969-12-31T23:59:59.999999999Z", -1, "1970-01-01T00:00:00Z"),
+        (
+            "1999-12-31T23:59:59.999999999Z",
+            946_684_799_999_999,
+            "2000-01-01T00:00:00Z",
+        ),
+        (
+            "2026-11-20T16:00:00.120300400+08:00",
+            1_795_161_600_120_300,
+            "2026-11-20T08:00:00.120300Z",
+        ),
+    ];
+
+    #[tokio::test]
+    async fn sqlite_timestamps_match_legacy_microseconds() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for (input, micros, _) in LEGACY_TIMESTAMPS {
+            let row = query(
+                Executor::SqlitePool(&pool),
+                "SELECT $1 AS actual, $2 AS legacy, $3 AS absent",
+            )
+            .bind_timestamp(input.parse().unwrap())
+            .bind(micros)
+            .bind_optional_timestamp(None)
+            .fetch_one()
+            .await
+            .unwrap();
+            assert_eq!(row.try_get::<i64, _>("actual").unwrap(), micros, "{input}");
+            let legacy = row.timestamp("legacy").unwrap();
+            assert_eq!(legacy, Timestamp::from_microsecond(micros).unwrap());
+            assert_eq!(row.optional_timestamp("actual").unwrap(), Some(legacy));
+            assert_eq!(row.optional_timestamp("absent").unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a real isolated transactional database"]
+    async fn postgres_timestamps_match_legacy_microseconds() {
+        let url = std::env::var("GESANG_TEST_DATABASE_URL").unwrap();
+        let pool = PgPool::connect(&url).await.unwrap();
+        for (input, _, expected) in LEGACY_TIMESTAMPS {
+            let row = query(
+                Executor::PostgresPool(&pool),
+                "SELECT $1 AS actual, CAST($2::text AS TIMESTAMPTZ) AS legacy, $3 AS absent",
+            )
+            .bind_timestamp(input.parse().unwrap())
+            .bind(expected)
+            .bind_optional_timestamp(None)
+            .fetch_one()
+            .await
+            .unwrap();
+            let legacy = row.timestamp("legacy").unwrap();
+            assert_eq!(legacy, expected.parse().unwrap());
+            assert_eq!(
+                row.optional_timestamp("actual").unwrap(),
+                Some(legacy),
+                "{input}"
+            );
+            assert_eq!(row.optional_timestamp("absent").unwrap(), None);
+        }
     }
 }

@@ -6,7 +6,7 @@ mod store;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -36,7 +36,8 @@ pub struct Initialization {
     /// Durable initialization state, independent of current custody availability.
     pub state: InitializationState,
     /// Database-confirmed creation time.
-    pub created_at: DateTime<Utc>,
+    #[serde(serialize_with = "gesang_api::timestamp::serialize")]
+    pub created_at: Timestamp,
 }
 
 /// First-store creation does not grant execution or prove physical termination.
@@ -100,7 +101,8 @@ pub struct CustodyReceipt {
     /// Whether this operation enrolled or revoked custody.
     pub action: CustodyAction,
     /// Database-confirmed operation time.
-    pub created_at: DateTime<Utc>,
+    #[serde(serialize_with = "gesang_api::timestamp::serialize")]
+    pub created_at: Timestamp,
 }
 
 /// Accepted custody operation types.
@@ -148,7 +150,7 @@ pub struct RuntimeRetirement {
     /// Exact controller attempt claiming this durable intent.
     pub claimant: Uuid,
     /// Database-observed claim expiration.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 /// Shared custody authority used by standalone and embedded hosts.

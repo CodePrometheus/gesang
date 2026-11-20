@@ -2,11 +2,11 @@
 
 mod queries;
 
-use chrono::{DateTime, Utc};
 use gesang_plugins::{
     Authority, BindingScope, InterfaceId, PackageVersion, PinSubject, PrincipalId, ServiceEndpoint,
     VersionPin,
 };
+use jiff::Timestamp;
 use uuid::Uuid;
 
 use crate::{Error, Result, Store, pins::pin_in};
@@ -31,7 +31,7 @@ pub struct ResourceBinding {
     /// Installer-verified package retained atomically with the resource binding.
     pub package: PackageVersion,
     /// Database-observed reservation time; not a provisioning completion timestamp.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 pub(crate) struct ResourceReservation<'a> {

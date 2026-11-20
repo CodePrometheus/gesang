@@ -14,13 +14,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, TimeDelta, Utc};
 use gesang_core::{
     Admission, AgentBinding, CommandRequirements, Custody, CustodyAction, CustodyEnrollment,
     CustodyKey, Dispatch, EngineBridge, Error, ExecutionResponse, InstanceObservation,
     InstanceProvider, Kernel, Owner, PayloadKey, PreviousWriter, Result, Runtime, RuntimePolicy,
     RuntimeRetirement, ServiceKey, ServiceKeyVerifier, Store, VerifiedIdentity, Wake,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use sqlx::{
     Executor,
@@ -93,7 +93,7 @@ impl Fixture {
     async fn runtime(&self) -> Runtime {
         let claim = self
             .store
-            .claim_runtime(self.agent_id, Uuid::new_v4(), TimeDelta::minutes(1))
+            .claim_runtime(self.agent_id, Uuid::new_v4(), SignedDuration::from_mins(1))
             .await
             .unwrap();
         self.store
@@ -370,7 +370,7 @@ impl InstanceProvider for Provider {
     async fn observe(&self, _: &Runtime) -> Result<InstanceObservation> {
         Ok(InstanceObservation::Unknown)
     }
-    async fn retain_until(&self, _: &Runtime, _: DateTime<Utc>) -> Result<()> {
+    async fn retain_until(&self, _: &Runtime, _: Timestamp) -> Result<()> {
         Err(Error::FencingRequired)
     }
     async fn stop(&self, _: &Runtime) -> Result<()> {
@@ -415,10 +415,10 @@ fn kernel(store: &Store, provider: Arc<Provider>) -> Kernel {
         provider,
         Arc::new(NoExecution),
         RuntimePolicy {
-            lease: TimeDelta::minutes(1),
-            delivery_lease: TimeDelta::seconds(10),
-            retry_delay: TimeDelta::seconds(1),
-            recovery_interval: TimeDelta::seconds(5),
+            lease: SignedDuration::from_mins(1),
+            delivery_lease: SignedDuration::from_secs(10),
+            retry_delay: SignedDuration::from_secs(1),
+            recovery_interval: SignedDuration::from_secs(5),
         },
     )
     .unwrap()
@@ -461,7 +461,11 @@ async fn revocation_invalidates_cached_runtime_and_recovers_retirement_before_re
     assert!(matches!(
         fixture
             .store
-            .claim_runtime(fixture.agent_id, Uuid::new_v4(), TimeDelta::minutes(1))
+            .claim_runtime(
+                fixture.agent_id,
+                Uuid::new_v4(),
+                SignedDuration::from_mins(1)
+            )
             .await,
         Err(Error::Forbidden)
     ));
@@ -607,7 +611,11 @@ async fn assert_concurrent_enrollment_and_retirement(fixture: Fixture) {
     ));
     let inflight = fixture
         .store
-        .claim_runtime(fixture.agent_id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(
+            fixture.agent_id,
+            Uuid::new_v4(),
+            SignedDuration::from_mins(1),
+        )
         .await
         .unwrap();
     let mut changed_binding = inflight.clone();
@@ -690,7 +698,7 @@ async fn wrapped_service_keys_cannot_be_substituted_between_owners_or_vaults() {
         .unwrap();
     let claim = fixture
         .store
-        .claim_runtime(agent.id, Uuid::new_v4(), TimeDelta::minutes(1))
+        .claim_runtime(agent.id, Uuid::new_v4(), SignedDuration::from_mins(1))
         .await
         .unwrap();
     let runtime = fixture

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use gesang_api::CapabilityScope;
 use gesang_core::ResourceBinding;
 use gesang_plugins::{InterfaceId, ServiceEndpoint};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -135,7 +135,8 @@ pub struct SandboxView {
     /// Whether a durable stop request is outstanding.
     pub stopping: bool,
     /// Time of this observation attempt.
-    pub observed_at: DateTime<Utc>,
+    #[serde(serialize_with = "gesang_api::timestamp::serialize")]
+    pub observed_at: Timestamp,
 }
 
 /// Independent resource operations shared by external clients and trusted host adapters.
