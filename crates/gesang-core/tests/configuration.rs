@@ -610,8 +610,9 @@ async fn assert_kernel_adopts_new_runtime_policy(fixture: Fixture) {
         .await
         .unwrap();
     let provider = Arc::new(Provider::default());
-    let kernel = Kernel::with_configuration(
-        fixture.store.clone(),
+    let storage: Arc<dyn gesang_core::CoordinationStore> = Arc::new(fixture.store.clone());
+    let kernel = Kernel::with_coordination_store_and_configuration(
+        storage,
         provider.clone(),
         Arc::new(NoExecution),
         fixture.center.clone(),

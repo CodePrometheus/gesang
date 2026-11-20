@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use crate::{
     AdoptionBoundary, Configuration, ConfigurationAccess, ConfigurationCenter, ConfigurationScope,
-    Dispatch, EngineBridge, EnginePreparation, Error, ExecutionResponse, InstanceObservation,
-    InstancePhase, InstanceProvider, InstancePurpose, Owner, PreparationProgress, PreviousWriter,
-    RequiredAuthority, Result, Runtime, Store,
+    CoordinationStore, Dispatch, EngineBridge, EnginePreparation, Error, ExecutionResponse,
+    InstanceObservation, InstancePhase, InstanceProvider, InstancePurpose, Owner,
+    PreparationProgress, PreviousWriter, RequiredAuthority, Result, Runtime, Store,
 };
 
 /// Explicit deployment timing policy; no hidden lease, retry, or history limits are supplied.
@@ -123,8 +123,8 @@ impl PolicySource {
 }
 
 /// Shared authorization, delivery, and runtime coordination used by independent hosts.
-pub struct Kernel {
-    store: Store,
+pub struct Kernel<S: CoordinationStore + ?Sized = Store> {
+    store: Arc<S>,
     provider: Arc<dyn InstanceProvider>,
     engine: Arc<dyn EngineBridge>,
     controller_id: Uuid,
@@ -132,7 +132,7 @@ pub struct Kernel {
     admission_locks: Mutex<HashMap<Uuid, Weak<tokio::sync::Mutex<()>>>>,
 }
 
-impl std::fmt::Debug for Kernel {
+impl<S: CoordinationStore + ?Sized> std::fmt::Debug for Kernel<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Kernel")
             .field("controller_id", &self.controller_id)
@@ -142,27 +142,56 @@ impl std::fmt::Debug for Kernel {
 }
 
 impl Kernel {
-    /// Constructs one controller process with host adapters and validated explicit policy.
+    /// Constructs one controller with the built-in coordination store and explicit policy.
     pub fn new(
         store: Store,
         provider: Arc<dyn InstanceProvider>,
         engine: Arc<dyn EngineBridge>,
         policy: RuntimePolicy,
     ) -> Result<Self> {
+        Self::with_coordination_store(Arc::new(store), provider, engine, policy)
+    }
+
+    /// Uses the built-in store and records each controller's published policy adoption.
+    pub async fn with_configuration(
+        store: Store,
+        provider: Arc<dyn InstanceProvider>,
+        engine: Arc<dyn EngineBridge>,
+        center: ConfigurationCenter,
+        access: ConfigurationAccess,
+    ) -> Result<Self> {
+        Self::with_coordination_store_and_configuration(
+            Arc::new(store),
+            provider,
+            engine,
+            center,
+            access,
+        )
+        .await
+    }
+}
+
+impl<S: CoordinationStore + ?Sized> Kernel<S> {
+    /// Constructs a controller with host-supplied durable coordination and fixed policy.
+    pub fn with_coordination_store(
+        store: Arc<S>,
+        provider: Arc<dyn InstanceProvider>,
+        engine: Arc<dyn EngineBridge>,
+        policy: RuntimePolicy,
+    ) -> Result<Self> {
         policy.validate()?;
-        Ok(Self {
+        Ok(Self::assemble(
             store,
             provider,
             engine,
-            controller_id: Uuid::new_v4(),
-            policy: PolicySource::Fixed(policy),
-            admission_locks: Mutex::new(HashMap::new()),
-        })
+            Uuid::new_v4(),
+            PolicySource::Fixed(policy),
+        ))
     }
 
-    /// Uses published runtime settings and records each controller's actual revision adoption.
-    pub async fn with_configuration(
-        store: Store,
+    /// Uses host-supplied durable coordination with published runtime settings.
+    pub async fn with_coordination_store_and_configuration(
+        store: Arc<S>,
         provider: Arc<dyn InstanceProvider>,
         engine: Arc<dyn EngineBridge>,
         center: ConfigurationCenter,
@@ -171,18 +200,34 @@ impl Kernel {
         let controller_id = Uuid::new_v4();
         let policy = PolicySource::Published { center, access };
         policy.get(controller_id).await?;
-        Ok(Self {
+        Ok(Self::assemble(
+            store,
+            provider,
+            engine,
+            controller_id,
+            policy,
+        ))
+    }
+
+    fn assemble(
+        store: Arc<S>,
+        provider: Arc<dyn InstanceProvider>,
+        engine: Arc<dyn EngineBridge>,
+        controller_id: Uuid,
+        policy: PolicySource,
+    ) -> Self {
+        Self {
             store,
             provider,
             engine,
             controller_id,
             policy,
             admission_locks: Mutex::new(HashMap::new()),
-        })
+        }
     }
 
-    /// Returns the shared platform store for authorized host operations.
-    pub fn store(&self) -> &Store {
+    /// Returns the store supplied by the host.
+    pub fn store(&self) -> &S {
         &self.store
     }
 

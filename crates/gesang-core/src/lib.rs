@@ -3,6 +3,7 @@
 mod anchor;
 mod catalog;
 mod configuration;
+mod coordination;
 mod crypto;
 mod custody;
 mod error;
@@ -19,6 +20,7 @@ pub use configuration::{
     AdoptionBoundary, Configuration, ConfigurationAccess, ConfigurationCenter, ConfigurationChange,
     ConfigurationKey, ConfigurationRevision, ConfigurationScope, SecretInput, SecretReference,
 };
+pub use coordination::CoordinationStore;
 pub use crypto::PayloadKey;
 pub use custody::{
     Custody, CustodyAction, CustodyEnrollment, CustodyKey, CustodyReceipt, CustodyStatus,
