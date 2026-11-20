@@ -963,6 +963,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "jiff",
+ "jiff-sqlx",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -1446,6 +1447,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e599b80292e597019b8b3e392de3f4bea2959ddfb8c7dff60e035e9e311a2c1b"
 dependencies = [
  "log",
+]
+
+[[package]]
+name = "jiff-sqlx"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92b5f7fecbc824f6a2e6a40896613c65b1f5578cd1dcc108503672589682eed1"
+dependencies = [
+ "jiff",
+ "sqlx",
 ]
 
 [[package]]
