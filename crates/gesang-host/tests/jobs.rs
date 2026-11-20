@@ -40,6 +40,9 @@ use uuid::Uuid;
 #[path = "jobs/node-client.rs"]
 mod node_client;
 
+#[path = "jobs/sqlite.rs"]
+mod sqlite;
+
 #[derive(Default)]
 struct Policy {
     deny: AtomicBool,

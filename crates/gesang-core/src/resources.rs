@@ -60,7 +60,7 @@ impl Store {
     ///
     /// The read does not modify the binding or start provider work.
     pub async fn resource_binding(&self, caller: &Authority, id: Uuid) -> Result<ResourceBinding> {
-        queries::read(self.pool(), caller, id)
+        queries::read(self.database.executor(), caller, id)
             .await?
             .ok_or(Error::NotFound)?
             .try_into()
@@ -82,7 +82,7 @@ impl Store {
         interface: &InterfaceId,
         request_id: Uuid,
     ) -> Result<Option<ResourceBinding>> {
-        queries::request(self.pool(), caller, interface, request_id)
+        queries::request(self.database.executor(), caller, interface, request_id)
             .await?
             .map(TryInto::try_into)
             .transpose()
@@ -92,15 +92,15 @@ impl Store {
         &self,
         reservation: ResourceReservation<'_>,
     ) -> Result<ResourceBinding> {
-        let mut tx = self.begin().await?;
-        let actual: ResourceBinding = queries::reserve(&mut tx, Uuid::new_v4(), &reservation)
+        let mut tx = self.database.begin().await?;
+        let actual: ResourceBinding = queries::reserve(tx.executor(), Uuid::new_v4(), &reservation)
             .await?
             .try_into()?;
         if actual.request_digest != reservation.request_digest {
             return Err(Error::RequestConflict);
         }
         pin_in(
-            &mut tx,
+            &mut tx.coordination(),
             VersionPin {
                 subject: PinSubject::Resource {
                     binding: actual.binding,

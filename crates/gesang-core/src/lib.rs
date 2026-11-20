@@ -33,4 +33,4 @@ pub use lifecycle::{
     InstanceRecord, PreparationProgress,
 };
 pub use resources::ResourceBinding;
-pub use store::{GrantRequirement, PendingCommand, Store, WakeClaim};
+pub use store::{CoordinationTransaction, GrantRequirement, PendingCommand, Store, WakeClaim};

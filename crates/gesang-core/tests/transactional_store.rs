@@ -972,3 +972,116 @@ async fn concurrent_new_work_cannot_be_erased_by_an_old_wake_receipt() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn sqlite_delivery_retains_original_request_and_rejects_stale_attempts() {
+    let path = std::env::temp_dir().join(format!("gesang-delivery-{}.sqlite", Uuid::new_v4()));
+    let store = Store::open_sqlite(&path, PayloadKey::new([42; 32]))
+        .await
+        .unwrap();
+    let owner = store
+        .bind_owner(&VerifiedIdentity {
+            issuer: "test".into(),
+            subject: "sqlite".into(),
+        })
+        .await
+        .unwrap();
+    let agent = store.ensure_agent(&owner, "engine", "local").await.unwrap();
+    let grant = store
+        .select_grant(
+            &owner,
+            agent.id,
+            &GrantSelection {
+                mode: PermissionMode::FullAccess,
+                scopes: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let mut submission = CommandSubmission {
+        request_id: Uuid::new_v4(),
+        authorization: CommandAuthorization::Grant {
+            id: grant.id,
+            version: grant.version,
+        },
+        command: json!({"kind":"goal.submit","objective":"fixture"}),
+    };
+    let pending = store
+        .enqueue(&owner, agent.id, &submission, &execution_requirements())
+        .await
+        .unwrap();
+    assert_eq!(pending.state, gesang_api::DeliveryState::Pending);
+    let lease = TimeDelta::minutes(1);
+    let wake = store
+        .claim_wake(Uuid::new_v4(), lease)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(wake.agent_id, agent.id);
+    store.settle_wake(&wake, None).await.unwrap();
+    let first = store
+        .claim_command(Uuid::new_v4(), lease)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .claim_command(Uuid::new_v4(), lease)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store
+        .defer_command(&first, Utc::now() - TimeDelta::milliseconds(1))
+        .await
+        .unwrap();
+    let second = store
+        .claim_command(Uuid::new_v4(), lease)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.request_id, second.request_id);
+    assert_eq!(second.command, submission.command);
+    let receipt = json!({"requestId":submission.request_id,"goalId":"original"});
+    assert!(matches!(
+        store.accept_command(&first, &receipt).await,
+        Err(Error::VersionConflict)
+    ));
+    store.accept_command(&second, &receipt).await.unwrap();
+    store.sqlite_pool().unwrap().close().await;
+
+    let reopened = Store::open_sqlite(&path, PayloadKey::new([42; 32]))
+        .await
+        .unwrap();
+    let accepted = reopened
+        .receipt(&owner, submission.request_id)
+        .await
+        .unwrap();
+    assert_eq!(accepted.engine_receipt, Some(receipt));
+    reopened
+        .revoke_grant(&owner, agent.id, grant.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .enqueue(&owner, agent.id, &submission, &execution_requirements())
+            .await
+            .unwrap(),
+        accepted
+    );
+    submission.command["objective"] = json!("different command");
+    assert!(matches!(
+        reopened
+            .enqueue(&owner, agent.id, &submission, &execution_requirements())
+            .await,
+        Err(Error::RequestConflict)
+    ));
+    submission.request_id = Uuid::new_v4();
+    assert!(matches!(
+        reopened
+            .enqueue(&owner, agent.id, &submission, &execution_requirements())
+            .await,
+        Err(Error::Forbidden)
+    ));
+    reopened.sqlite_pool().unwrap().close().await;
+}

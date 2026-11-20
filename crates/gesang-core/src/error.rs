@@ -34,6 +34,9 @@ pub enum Error {
     /// Database configuration does not provide the required transaction guarantees.
     #[error("durable read-committed database transactions are required")]
     DurabilityRequired,
+    /// The operation requires a different configured storage backend.
+    #[error("operation requires a different storage backend")]
+    StorageBackend,
     /// A command violates its public contract before execution admission.
     #[error("invalid command: {0}")]
     InvalidCommand(String),

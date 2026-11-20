@@ -1,5 +1,6 @@
+use crate::CoordinationTransaction;
+use crate::store::database::{Row, query, query_scalar, statement};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{Error, Result, Runtime, Store};
@@ -46,17 +47,22 @@ impl Store {
         if genesis_digest.is_empty() {
             return Err(Error::FreshnessMismatch);
         }
-        let mut tx = self.pool().begin().await?;
-        verify_writer(&mut tx, runtime).await?;
-        sqlx::query("SET LOCAL synchronous_commit='on'")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO gesang_anchors(agent_id,digest) VALUES($1,$2) ON CONFLICT(agent_id) DO NOTHING")
-            .bind(runtime.agent_id).bind(genesis_digest).execute(&mut *tx).await?;
-        let row = sqlx::query("SELECT * FROM gesang_anchors WHERE agent_id=$1 FOR UPDATE")
-            .bind(runtime.agent_id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let mut tx = self.database.begin().await?;
+        verify_writer(&mut tx.coordination(), runtime).await?;
+        query(tx.executor(), "INSERT INTO gesang_anchors(agent_id,digest) VALUES($1,$2) ON CONFLICT(agent_id) DO NOTHING")
+    .bind(runtime.agent_id)
+    .bind(genesis_digest)
+    .execute().await?;
+        let row = query(
+            tx.executor(),
+            statement!(
+                "SELECT * FROM gesang_anchors WHERE agent_id=$1",
+                [" FOR UPDATE", ""]
+            ),
+        )
+        .bind(runtime.agent_id)
+        .fetch_one()
+        .await?;
         let anchor = read_anchor(&row)?;
         if anchor.head.sequence == 0 && anchor.head.digest != genesis_digest {
             return Err(Error::FreshnessMismatch);
@@ -67,13 +73,16 @@ impl Store {
 
     /// Reads trusted freshness only for the admitted current writer.
     pub async fn anchor(&self, runtime: &Runtime) -> Result<Anchor> {
-        let mut tx = self.pool().begin().await?;
-        verify_writer(&mut tx, runtime).await?;
-        let row = sqlx::query("SELECT * FROM gesang_anchors WHERE agent_id=$1")
-            .bind(runtime.agent_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::NotFound)?;
+        let mut tx = self.database.begin_read().await?;
+        verify_writer(&mut tx.coordination(), runtime).await?;
+        let row = query(
+            tx.executor(),
+            "SELECT * FROM gesang_anchors WHERE agent_id=$1",
+        )
+        .bind(runtime.agent_id)
+        .fetch_optional()
+        .await?
+        .ok_or(Error::NotFound)?;
         let anchor = read_anchor(&row)?;
         tx.commit().await?;
         Ok(anchor)
@@ -92,16 +101,19 @@ impl Store {
         {
             return Err(Error::FreshnessMismatch);
         }
-        let mut tx = self.pool().begin().await?;
-        verify_writer(&mut tx, runtime).await?;
-        sqlx::query("SET LOCAL synchronous_commit='on'")
-            .execute(&mut *tx)
-            .await?;
-        let row = sqlx::query("SELECT * FROM gesang_anchors WHERE agent_id=$1 FOR UPDATE")
-            .bind(runtime.agent_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::NotFound)?;
+        let mut tx = self.database.begin().await?;
+        verify_writer(&mut tx.coordination(), runtime).await?;
+        let row = query(
+            tx.executor(),
+            statement!(
+                "SELECT * FROM gesang_anchors WHERE agent_id=$1",
+                [" FOR UPDATE", ""]
+            ),
+        )
+        .bind(runtime.agent_id)
+        .fetch_optional()
+        .await?
+        .ok_or(Error::NotFound)?;
         let mut anchor = read_anchor(&row)?;
         if anchor.head != *expected {
             return Err(Error::FreshnessMismatch);
@@ -111,9 +123,13 @@ impl Store {
                 return Err(Error::VersionConflict);
             }
         } else {
-            sqlx::query("UPDATE gesang_anchors SET pending_id=$1,pending_generation=$2,pending_sequence=$3,pending_digest=$4 WHERE agent_id=$5")
-                .bind(pending.operation_id).bind(pending.generation).bind(pending.next.sequence).bind(&pending.next.digest)
-                .bind(runtime.agent_id).execute(&mut *tx).await?;
+            query(tx.executor(), "UPDATE gesang_anchors SET pending_id=$1,pending_generation=$2,pending_sequence=$3,pending_digest=$4 WHERE agent_id=$5")
+    .bind(pending.operation_id)
+    .bind(pending.generation)
+    .bind(pending.next.sequence)
+    .bind(&pending.next.digest)
+    .bind(runtime.agent_id)
+    .execute().await?;
             anchor.pending = Some(pending.clone());
         }
         tx.commit().await?;
@@ -130,16 +146,19 @@ impl Store {
         if local != &pending.next {
             return Err(Error::FreshnessMismatch);
         }
-        let mut tx = self.pool().begin().await?;
-        verify_writer(&mut tx, runtime).await?;
-        sqlx::query("SET LOCAL synchronous_commit='on'")
-            .execute(&mut *tx)
-            .await?;
-        let row = sqlx::query("SELECT * FROM gesang_anchors WHERE agent_id=$1 FOR UPDATE")
-            .bind(runtime.agent_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::NotFound)?;
+        let mut tx = self.database.begin().await?;
+        verify_writer(&mut tx.coordination(), runtime).await?;
+        let row = query(
+            tx.executor(),
+            statement!(
+                "SELECT * FROM gesang_anchors WHERE agent_id=$1",
+                [" FOR UPDATE", ""]
+            ),
+        )
+        .bind(runtime.agent_id)
+        .fetch_optional()
+        .await?
+        .ok_or(Error::NotFound)?;
         let anchor = read_anchor(&row)?;
         if anchor.pending.is_none() && anchor.head == *local {
             tx.commit().await?;
@@ -148,8 +167,11 @@ impl Store {
         if anchor.pending.as_ref() != Some(pending) {
             return Err(Error::FreshnessMismatch);
         }
-        sqlx::query("UPDATE gesang_anchors SET sequence=$1,digest=$2,pending_id=NULL,pending_generation=NULL,pending_sequence=NULL,pending_digest=NULL WHERE agent_id=$3")
-            .bind(local.sequence).bind(&local.digest).bind(runtime.agent_id).execute(&mut *tx).await?;
+        query(tx.executor(), "UPDATE gesang_anchors SET sequence=$1,digest=$2,pending_id=NULL,pending_generation=NULL,pending_sequence=NULL,pending_digest=NULL WHERE agent_id=$3")
+    .bind(local.sequence)
+    .bind(&local.digest)
+    .bind(runtime.agent_id)
+    .execute().await?;
         tx.commit().await?;
         Ok(Anchor {
             head: local.clone(),
@@ -164,22 +186,26 @@ impl Store {
         pending: &PendingAnchor,
         verified_local: &AnchorHead,
     ) -> Result<Anchor> {
-        let mut tx = self.pool().begin().await?;
-        verify_writer(&mut tx, runtime).await?;
-        sqlx::query("SET LOCAL synchronous_commit='on'")
-            .execute(&mut *tx)
-            .await?;
-        let row = sqlx::query("SELECT * FROM gesang_anchors WHERE agent_id=$1 FOR UPDATE")
-            .bind(runtime.agent_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::NotFound)?;
+        let mut tx = self.database.begin().await?;
+        verify_writer(&mut tx.coordination(), runtime).await?;
+        let row = query(
+            tx.executor(),
+            statement!(
+                "SELECT * FROM gesang_anchors WHERE agent_id=$1",
+                [" FOR UPDATE", ""]
+            ),
+        )
+        .bind(runtime.agent_id)
+        .fetch_optional()
+        .await?
+        .ok_or(Error::NotFound)?;
         let mut anchor = read_anchor(&row)?;
         if anchor.pending.as_ref() != Some(pending) || anchor.head != *verified_local {
             return Err(Error::FreshnessMismatch);
         }
-        sqlx::query("UPDATE gesang_anchors SET pending_id=NULL,pending_generation=NULL,pending_sequence=NULL,pending_digest=NULL WHERE agent_id=$1")
-            .bind(runtime.agent_id).execute(&mut *tx).await?;
+        query(tx.executor(), "UPDATE gesang_anchors SET pending_id=NULL,pending_generation=NULL,pending_sequence=NULL,pending_digest=NULL WHERE agent_id=$1")
+    .bind(runtime.agent_id)
+    .execute().await?;
         anchor.pending = None;
         tx.commit().await?;
         Ok(anchor)
@@ -187,26 +213,31 @@ impl Store {
 }
 
 pub(crate) async fn verify_writer(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut CoordinationTransaction<'_, '_>,
     runtime: &Runtime,
 ) -> Result<()> {
-    let id=sqlx::query_scalar::<_,Uuid>("SELECT a.id FROM gesang_agents a JOIN gesang_instance_intents i ON i.id=a.runtime_id AND i.agent_id=a.id AND i.generation=a.generation AND i.locator=a.runtime_locator WHERE a.id=$1 AND a.runtime_id=$2 AND a.generation=$3 AND a.runtime_generation=$3 AND a.engine_owner=$4 AND a.runtime_locator=$5 AND a.lease_until>clock_timestamp() AND i.phase NOT IN ('allocating','stopped') FOR SHARE OF a,i")
-        .bind(runtime.agent_id).bind(runtime.id).bind(runtime.generation).bind(&runtime.engine_owner).bind(&runtime.locator)
-        .fetch_optional(&mut **tx).await?;
+    let id=query_scalar::<Uuid>(tx.executor(), statement!("SELECT a.id FROM gesang_agents a JOIN gesang_instance_intents i ON i.id=a.runtime_id AND i.agent_id=a.id AND i.generation=a.generation AND i.locator=a.runtime_locator WHERE a.id=$1 AND a.runtime_id=$2 AND a.generation=$3 AND a.runtime_generation=$3 AND a.engine_owner=$4 AND a.runtime_locator=$5 AND a.lease_until>", clock, " AND i.phase NOT IN ('allocating','stopped')", [" FOR SHARE OF a,i", ""]))
+    .bind(runtime.agent_id)
+    .bind(runtime.id)
+    .bind(runtime.generation)
+    .bind(&runtime.engine_owner)
+    .bind(&runtime.locator)
+    .fetch_optional().await?;
     id.ok_or(Error::StaleGeneration)?;
     Ok(())
 }
 
 pub(crate) async fn verify_execution(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut CoordinationTransaction<'_, '_>,
     runtime: &Runtime,
 ) -> Result<()> {
     verify_writer(tx, runtime).await?;
-    let row = sqlx::query(
+    let row = query(
+        tx.executor(),
         "SELECT plan->>'purpose' AS purpose,phase FROM gesang_instance_intents WHERE id=$1",
     )
     .bind(runtime.id)
-    .fetch_one(&mut **tx)
+    .fetch_one()
     .await?;
     if row.try_get::<&str, _>("purpose")? != "execution" {
         return Err(Error::Forbidden);
@@ -217,7 +248,7 @@ pub(crate) async fn verify_execution(
     Ok(())
 }
 
-fn read_anchor(row: &sqlx::postgres::PgRow) -> Result<Anchor> {
+fn read_anchor(row: &Row) -> Result<Anchor> {
     let head = AnchorHead {
         sequence: row.try_get("sequence")?,
         digest: row.try_get("digest")?,

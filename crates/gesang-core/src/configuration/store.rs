@@ -1,8 +1,9 @@
+use crate::CoordinationTransaction;
+use crate::store::database::{Row, Statement, query, query_scalar, statement};
 use std::{collections::BTreeMap, sync::Arc};
 
 use hmac::Mac;
 use serde_json::{Value, json};
-use sqlx::{PgConnection, Row, postgres::PgRow};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -82,17 +83,22 @@ impl ConfigurationCenter {
                 }
             }
         }
-        let mut tx = self.store.begin().await?;
-        sqlx::query("INSERT INTO gesang_configuration_streams(id,scope_key,owner_id,component) VALUES($1,$2,$3,$4) ON CONFLICT(scope_key,component) DO NOTHING")
-            .bind(Uuid::new_v4()).bind(scope.key()?).bind(scope.owner()).bind(T::COMPONENT).execute(&mut *tx).await?;
-        let stream = stream::<T>(&mut tx, scope, true).await?;
+        let mut tx = self.store.database.begin().await?;
+        query(tx.executor(), "INSERT INTO gesang_configuration_streams(id,scope_key,owner_id,component) VALUES($1,$2,$3,$4) ON CONFLICT(scope_key,component) DO NOTHING")
+    .bind(Uuid::new_v4())
+    .bind(scope.key()?)
+    .bind(scope.owner())
+    .bind(T::COMPONENT)
+    .execute().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, true).await?;
         let stream_id: Uuid = stream.try_get("id")?;
-        if let Some(row) = sqlx::query(
+        if let Some(row) = query(
+            tx.executor(),
             "SELECT * FROM gesang_configuration_revisions WHERE stream_id=$1 AND operation_id=$2",
         )
         .bind(stream_id)
         .bind(change.operation_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional()
         .await?
         {
             if fingerprint
@@ -116,7 +122,8 @@ impl ConfigurationCenter {
         for (name, input) in &change.secrets {
             let reference = match input {
                 SecretInput::Keep(reference) => {
-                    self.secret(&mut tx, stream_id, name, reference).await?;
+                    self.secret(&mut tx.coordination(), stream_id, name, reference)
+                        .await?;
                     *reference
                 }
                 SecretInput::Set(value) => {
@@ -124,24 +131,40 @@ impl ConfigurationCenter {
                     let sealed = self
                         .key
                         .seal(&secret_aad(stream_id, name, reference.id), value)?;
-                    sqlx::query("INSERT INTO gesang_configuration_secrets(id,stream_id,name,sealed_value) VALUES($1,$2,$3,$4)")
-                        .bind(reference.id).bind(stream_id).bind(name).bind(sealed).execute(&mut *tx).await?;
+                    query(tx.executor(), "INSERT INTO gesang_configuration_secrets(id,stream_id,name,sealed_value) VALUES($1,$2,$3,$4)")
+    .bind(reference.id)
+    .bind(stream_id)
+    .bind(name)
+    .bind(sealed)
+    .execute().await?;
                     reference
                 }
             };
             references.insert(name.clone(), reference);
         }
-        let row = sqlx::query("INSERT INTO gesang_configuration_revisions(stream_id,revision,operation_id,expected_revision,schema_version,adoption_boundary,input_digest,values,secret_references,rollback_of,prepared_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *")
-            .bind(stream_id).bind(number).bind(change.operation_id).bind(change.expected_revision)
-            .bind(i64::from(T::SCHEMA_VERSION)).bind(T::ADOPTION_BOUNDARY.as_str()).bind(fingerprint.finalize().into_bytes().to_vec())
-            .bind(values).bind(serde_json::to_value(references)?).bind(rollback_of).bind(&actor).fetch_one(&mut *tx).await?;
-        sqlx::query("UPDATE gesang_configuration_streams SET next_revision=$1 WHERE id=$2")
-            .bind(successor)
-            .bind(stream_id)
-            .execute(&mut *tx)
-            .await?;
+        let row = query(tx.executor(), Statement::new("INSERT INTO gesang_configuration_revisions(stream_id,revision,operation_id,expected_revision,schema_version,adoption_boundary,input_digest,values,secret_references,rollback_of,prepared_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *", "INSERT INTO gesang_configuration_revisions(stream_id,revision,operation_id,expected_revision,schema_version,adoption_boundary,input_digest,\"values\",secret_references,rollback_of,prepared_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *"))
+    .bind(stream_id)
+    .bind(number)
+    .bind(change.operation_id)
+    .bind(change.expected_revision)
+    .bind(i64::from(T::SCHEMA_VERSION))
+    .bind(T::ADOPTION_BOUNDARY.as_str())
+    .bind(fingerprint.finalize().into_bytes().to_vec())
+    .bind(values)
+    .bind(serde_json::to_value(references)?)
+    .bind(rollback_of)
+    .bind(&actor)
+    .fetch_one().await?;
+        query(
+            tx.executor(),
+            "UPDATE gesang_configuration_streams SET next_revision=$1 WHERE id=$2",
+        )
+        .bind(successor)
+        .bind(stream_id)
+        .execute()
+        .await?;
         event(
-            &mut tx,
+            &mut tx.coordination(),
             stream_id,
             "prepared",
             &actor,
@@ -161,15 +184,16 @@ impl ConfigurationCenter {
         operation_id: Uuid,
     ) -> Result<ConfigurationRevision<T>> {
         access.check(scope)?;
-        let mut tx = self.store.begin().await?;
-        let stream = stream::<T>(&mut tx, scope, true).await?;
+        let mut tx = self.store.database.begin().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, true).await?;
         let stream_id = stream.try_get("id")?;
-        let row = sqlx::query(
+        let row = query(
+            tx.executor(),
             "SELECT * FROM gesang_configuration_revisions WHERE stream_id=$1 AND operation_id=$2",
         )
         .bind(stream_id)
         .bind(operation_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional()
         .await?
         .ok_or(Error::NotFound)?;
         let prepared = revision::<T>(&row, scope)?;
@@ -180,17 +204,31 @@ impl ConfigurationCenter {
         if prepared.expected_revision != stream.try_get::<Option<i64>, _>("active_revision")? {
             return Err(Error::VersionConflict);
         }
-        self.check_secrets(&mut tx, stream_id, &prepared.secrets)
+        self.check_secrets(&mut tx.coordination(), stream_id, &prepared.secrets)
             .await?;
         let actor = access.audit();
-        let row = sqlx::query("UPDATE gesang_configuration_revisions SET published_by=$1,published_at=clock_timestamp() WHERE stream_id=$2 AND revision=$3 RETURNING *")
-            .bind(&actor).bind(stream_id).bind(prepared.revision).fetch_one(&mut *tx).await?;
-        sqlx::query("UPDATE gesang_configuration_streams SET active_revision=$1 WHERE id=$2")
-            .bind(prepared.revision)
-            .bind(stream_id)
-            .execute(&mut *tx)
-            .await?;
-        event(&mut tx, stream_id, "published", &actor, json!({"revision":prepared.revision,"operationId":operation_id,"previous":prepared.expected_revision})).await?;
+        let row = query(
+            tx.executor(),
+            statement!(
+                "UPDATE gesang_configuration_revisions SET published_by=$1,published_at=",
+                clock,
+                " WHERE stream_id=$2 AND revision=$3 RETURNING *"
+            ),
+        )
+        .bind(&actor)
+        .bind(stream_id)
+        .bind(prepared.revision)
+        .fetch_one()
+        .await?;
+        query(
+            tx.executor(),
+            "UPDATE gesang_configuration_streams SET active_revision=$1 WHERE id=$2",
+        )
+        .bind(prepared.revision)
+        .bind(stream_id)
+        .execute()
+        .await?;
+        event(&mut tx.coordination(), stream_id, "published", &actor, json!({"revision":prepared.revision,"operationId":operation_id,"previous":prepared.expected_revision})).await?;
         let published = revision::<T>(&row, scope)?;
         tx.commit().await?;
         Ok(published)
@@ -203,12 +241,13 @@ impl ConfigurationCenter {
         scope: &ConfigurationScope,
     ) -> Result<ConfigurationRevision<T>> {
         access.check(scope)?;
-        let mut tx = self.store.pool().begin().await?;
-        let stream = stream::<T>(&mut tx, scope, false).await?;
+        let mut tx = self.store.database.begin_read().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, false).await?;
         let number = stream
             .try_get::<Option<i64>, _>("active_revision")?
             .ok_or(Error::NotFound)?;
-        let current = published::<T>(&mut tx, stream.try_get("id")?, number, scope).await?;
+        let current =
+            published::<T>(&mut tx.coordination(), stream.try_get("id")?, number, scope).await?;
         tx.commit().await?;
         Ok(current)
     }
@@ -226,23 +265,29 @@ impl ConfigurationCenter {
                 "automatic adoption requires a live configuration boundary".into(),
             ));
         }
-        let mut tx = self.store.begin().await?;
-        let stream = stream::<T>(&mut tx, scope, false).await?;
+        let mut tx = self.store.database.begin().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, false).await?;
         let stream_id: Uuid = stream.try_get("id")?;
         let number = stream
             .try_get::<Option<i64>, _>("active_revision")?
             .ok_or(Error::NotFound)?;
-        let value = published::<T>(&mut tx, stream_id, number, scope).await?;
-        self.check_secrets(&mut tx, stream_id, &value.secrets)
+        let value = published::<T>(&mut tx.coordination(), stream_id, number, scope).await?;
+        self.check_secrets(&mut tx.coordination(), stream_id, &value.secrets)
             .await?;
-        let previous = sqlx::query_scalar::<_, i64>("SELECT revision FROM gesang_configuration_adoptions WHERE stream_id=$1 AND consumer_id=$2 FOR UPDATE")
-            .bind(stream_id).bind(consumer_id).fetch_optional(&mut *tx).await?;
+        let previous = query_scalar::<i64>(tx.executor(), statement!("SELECT revision FROM gesang_configuration_adoptions WHERE stream_id=$1 AND consumer_id=$2", [" FOR UPDATE", ""]))
+    .bind(stream_id)
+    .bind(consumer_id)
+    .fetch_optional().await?;
         if previous != Some(number) {
             let actor = access.audit();
-            let changed = sqlx::query("INSERT INTO gesang_configuration_adoptions(stream_id,consumer_id,revision,adopted_by) VALUES($1,$2,$3,$4) ON CONFLICT(stream_id,consumer_id) DO UPDATE SET revision=EXCLUDED.revision,adopted_by=EXCLUDED.adopted_by,adopted_at=clock_timestamp() WHERE gesang_configuration_adoptions.revision<>EXCLUDED.revision")
-                .bind(stream_id).bind(consumer_id).bind(number).bind(&actor).execute(&mut *tx).await?.rows_affected();
+            let changed = query(tx.executor(), statement!("INSERT INTO gesang_configuration_adoptions(stream_id,consumer_id,revision,adopted_by) VALUES($1,$2,$3,$4) ON CONFLICT(stream_id,consumer_id) DO UPDATE SET revision=EXCLUDED.revision,adopted_by=EXCLUDED.adopted_by,adopted_at=", clock, " WHERE gesang_configuration_adoptions.revision<>EXCLUDED.revision"))
+    .bind(stream_id)
+    .bind(consumer_id)
+    .bind(number)
+    .bind(&actor)
+    .execute().await?;
             if changed != 0 {
-                event(&mut tx, stream_id, "adopted", &actor, json!({"consumerId":consumer_id,"revision":number,"previous":previous,"boundary":T::ADOPTION_BOUNDARY})).await?;
+                event(&mut tx.coordination(), stream_id, "adopted", &actor, json!({"consumerId":consumer_id,"revision":number,"previous":previous,"boundary":T::ADOPTION_BOUNDARY})).await?;
             }
         }
         tx.commit().await?;
@@ -257,9 +302,10 @@ impl ConfigurationCenter {
         number: i64,
     ) -> Result<ConfigurationRevision<T>> {
         access.check(scope)?;
-        let mut tx = self.store.pool().begin().await?;
-        let stream = stream::<T>(&mut tx, scope, false).await?;
-        let value = published::<T>(&mut tx, stream.try_get("id")?, number, scope).await?;
+        let mut tx = self.store.database.begin_read().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, false).await?;
+        let value =
+            published::<T>(&mut tx.coordination(), stream.try_get("id")?, number, scope).await?;
         tx.commit().await?;
         Ok(value)
     }
@@ -297,17 +343,19 @@ impl ConfigurationCenter {
         name: &str,
     ) -> Result<Zeroizing<Vec<u8>>> {
         access.check(scope)?;
-        let mut tx = self.store.pool().begin().await?;
-        let stream = stream::<T>(&mut tx, scope, false).await?;
+        let mut tx = self.store.database.begin_read().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, false).await?;
         if T::ADOPTION_BOUNDARY == AdoptionBoundary::Live
             && stream.try_get::<Option<i64>, _>("active_revision")? != Some(number)
         {
             return Err(Error::VersionConflict);
         }
         let stream_id = stream.try_get("id")?;
-        let value = published::<T>(&mut tx, stream_id, number, scope).await?;
+        let value = published::<T>(&mut tx.coordination(), stream_id, number, scope).await?;
         let reference = value.secrets.get(name).ok_or(Error::NotFound)?;
-        let secret = self.secret(&mut tx, stream_id, name, reference).await?;
+        let secret = self
+            .secret(&mut tx.coordination(), stream_id, name, reference)
+            .await?;
         tx.commit().await?;
         Ok(secret)
     }
@@ -321,23 +369,28 @@ impl ConfigurationCenter {
         reference: SecretReference,
     ) -> Result<()> {
         access.check(scope)?;
-        let mut tx = self.store.begin().await?;
-        let stream = stream::<T>(&mut tx, scope, true).await?;
+        let mut tx = self.store.database.begin().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, true).await?;
         let stream_id: Uuid = stream.try_get("id")?;
-        let row = sqlx::query("SELECT revoked_at FROM gesang_configuration_secrets WHERE id=$1 AND stream_id=$2 AND name=$3")
-            .bind(reference.id).bind(stream_id).bind(name).fetch_optional(&mut *tx).await?.ok_or(Error::NotFound)?;
-        if row
-            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("revoked_at")?
-            .is_none()
-        {
-            sqlx::query(
-                "UPDATE gesang_configuration_secrets SET revoked_at=clock_timestamp() WHERE id=$1",
+        let row = query(tx.executor(), "SELECT revoked_at FROM gesang_configuration_secrets WHERE id=$1 AND stream_id=$2 AND name=$3")
+    .bind(reference.id)
+    .bind(stream_id)
+    .bind(name)
+    .fetch_optional().await?.ok_or(Error::NotFound)?;
+        if row.optional_timestamp("revoked_at")?.is_none() {
+            query(
+                tx.executor(),
+                statement!(
+                    "UPDATE gesang_configuration_secrets SET revoked_at=",
+                    clock,
+                    " WHERE id=$1"
+                ),
             )
             .bind(reference.id)
-            .execute(&mut *tx)
+            .execute()
             .await?;
             event(
-                &mut tx,
+                &mut tx.coordination(),
                 stream_id,
                 "secret_revoked",
                 &access.audit(),
@@ -359,12 +412,14 @@ impl ConfigurationCenter {
         expected_adoption: Option<i64>,
     ) -> Result<ConfigurationRevision<T>> {
         access.check(scope)?;
-        let mut tx = self.store.begin().await?;
-        let stream = stream::<T>(&mut tx, scope, true).await?;
+        let mut tx = self.store.database.begin().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, true).await?;
         let stream_id: Uuid = stream.try_get("id")?;
-        let current = sqlx::query_scalar::<_, i64>("SELECT revision FROM gesang_configuration_adoptions WHERE stream_id=$1 AND consumer_id=$2")
-            .bind(stream_id).bind(consumer_id).fetch_optional(&mut *tx).await?;
-        let value = published::<T>(&mut tx, stream_id, number, scope).await?;
+        let current = query_scalar::<i64>(tx.executor(), "SELECT revision FROM gesang_configuration_adoptions WHERE stream_id=$1 AND consumer_id=$2")
+    .bind(stream_id)
+    .bind(consumer_id)
+    .fetch_optional().await?;
+        let value = published::<T>(&mut tx.coordination(), stream_id, number, scope).await?;
         let active: Option<i64> = stream.try_get("active_revision")?;
         if active != Some(number)
             && (current != Some(number) || T::ADOPTION_BOUNDARY == AdoptionBoundary::Live)
@@ -374,13 +429,17 @@ impl ConfigurationCenter {
         if current != Some(number) && current != expected_adoption {
             return Err(Error::VersionConflict);
         }
-        self.check_secrets(&mut tx, stream_id, &value.secrets)
+        self.check_secrets(&mut tx.coordination(), stream_id, &value.secrets)
             .await?;
         if current != Some(number) {
             let actor = access.audit();
-            sqlx::query("INSERT INTO gesang_configuration_adoptions(stream_id,consumer_id,revision,adopted_by) VALUES($1,$2,$3,$4) ON CONFLICT(stream_id,consumer_id) DO UPDATE SET revision=EXCLUDED.revision,adopted_by=EXCLUDED.adopted_by,adopted_at=clock_timestamp()")
-                .bind(stream_id).bind(consumer_id).bind(number).bind(&actor).execute(&mut *tx).await?;
-            event(&mut tx, stream_id, "adopted", &actor, json!({"consumerId":consumer_id,"revision":number,"previous":current,"boundary":T::ADOPTION_BOUNDARY})).await?;
+            query(tx.executor(), statement!("INSERT INTO gesang_configuration_adoptions(stream_id,consumer_id,revision,adopted_by) VALUES($1,$2,$3,$4) ON CONFLICT(stream_id,consumer_id) DO UPDATE SET revision=EXCLUDED.revision,adopted_by=EXCLUDED.adopted_by,adopted_at=", clock))
+    .bind(stream_id)
+    .bind(consumer_id)
+    .bind(number)
+    .bind(&actor)
+    .execute().await?;
+            event(&mut tx.coordination(), stream_id, "adopted", &actor, json!({"consumerId":consumer_id,"revision":number,"previous":current,"boundary":T::ADOPTION_BOUNDARY})).await?;
         }
         tx.commit().await?;
         Ok(value)
@@ -394,10 +453,12 @@ impl ConfigurationCenter {
         consumer_id: Uuid,
     ) -> Result<Option<i64>> {
         access.check(scope)?;
-        let mut tx = self.store.pool().begin().await?;
-        let stream = stream::<T>(&mut tx, scope, false).await?;
-        let number = sqlx::query_scalar("SELECT revision FROM gesang_configuration_adoptions WHERE stream_id=$1 AND consumer_id=$2")
-            .bind(stream.try_get::<Uuid, _>("id")?).bind(consumer_id).fetch_optional(&mut *tx).await?;
+        let mut tx = self.store.database.begin_read().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, false).await?;
+        let number = query_scalar(tx.executor(), "SELECT revision FROM gesang_configuration_adoptions WHERE stream_id=$1 AND consumer_id=$2")
+    .bind(stream.try_get::<Uuid, _>("id")?)
+    .bind(consumer_id)
+    .fetch_optional().await?;
         tx.commit().await?;
         Ok(number)
     }
@@ -410,18 +471,20 @@ impl ConfigurationCenter {
         consumer_id: Uuid,
     ) -> Result<ConfigurationRevision<T>> {
         access.check(scope)?;
-        let mut tx = self.store.pool().begin().await?;
-        let stream = stream::<T>(&mut tx, scope, false).await?;
+        let mut tx = self.store.database.begin_read().await?;
+        let stream = stream::<T>(&mut tx.coordination(), scope, false).await?;
         let stream_id: Uuid = stream.try_get("id")?;
-        let number = sqlx::query_scalar::<_, i64>("SELECT revision FROM gesang_configuration_adoptions WHERE stream_id=$1 AND consumer_id=$2")
-            .bind(stream_id).bind(consumer_id).fetch_optional(&mut *tx).await?.ok_or(Error::NotFound)?;
+        let number = query_scalar::<i64>(tx.executor(), "SELECT revision FROM gesang_configuration_adoptions WHERE stream_id=$1 AND consumer_id=$2")
+    .bind(stream_id)
+    .bind(consumer_id)
+    .fetch_optional().await?.ok_or(Error::NotFound)?;
         if T::ADOPTION_BOUNDARY == AdoptionBoundary::Live
             && stream.try_get::<Option<i64>, _>("active_revision")? != Some(number)
         {
             return Err(Error::VersionConflict);
         }
-        let value = published::<T>(&mut tx, stream_id, number, scope).await?;
-        self.check_secrets(&mut tx, stream_id, &value.secrets)
+        let value = published::<T>(&mut tx.coordination(), stream_id, number, scope).await?;
+        self.check_secrets(&mut tx.coordination(), stream_id, &value.secrets)
             .await?;
         tx.commit().await?;
         Ok(value)
@@ -429,7 +492,7 @@ impl ConfigurationCenter {
 
     async fn check_secrets(
         &self,
-        connection: &mut PgConnection,
+        connection: &mut CoordinationTransaction<'_, '_>,
         stream_id: Uuid,
         references: &BTreeMap<String, SecretReference>,
     ) -> Result<()> {
@@ -441,49 +504,60 @@ impl ConfigurationCenter {
 
     async fn secret(
         &self,
-        connection: &mut PgConnection,
+        connection: &mut CoordinationTransaction<'_, '_>,
         stream_id: Uuid,
         name: &str,
         reference: &SecretReference,
     ) -> Result<Zeroizing<Vec<u8>>> {
-        let sealed = sqlx::query_scalar::<_, Vec<u8>>("SELECT sealed_value FROM gesang_configuration_secrets WHERE id=$1 AND stream_id=$2 AND name=$3 AND revoked_at IS NULL")
-            .bind(reference.id).bind(stream_id).bind(name).fetch_optional(connection).await?.ok_or(Error::Forbidden)?;
+        let sealed = query_scalar::<Vec<u8>>(connection.executor(), "SELECT sealed_value FROM gesang_configuration_secrets WHERE id=$1 AND stream_id=$2 AND name=$3 AND revoked_at IS NULL")
+    .bind(reference.id)
+    .bind(stream_id)
+    .bind(name)
+    .fetch_optional().await?.ok_or(Error::Forbidden)?;
         self.key
             .open(&secret_aad(stream_id, name, reference.id), &sealed)
     }
 }
 
 async fn stream<T: Configuration>(
-    connection: &mut PgConnection,
+    connection: &mut CoordinationTransaction<'_, '_>,
     scope: &ConfigurationScope,
     exclusive: bool,
-) -> Result<PgRow> {
-    let query = if exclusive {
+) -> Result<Row> {
+    let sql = if exclusive {
         "SELECT * FROM gesang_configuration_streams WHERE scope_key=$1 AND component=$2 FOR UPDATE"
     } else {
         "SELECT * FROM gesang_configuration_streams WHERE scope_key=$1 AND component=$2 FOR SHARE"
     };
-    sqlx::query(query)
-        .bind(scope.key()?)
-        .bind(T::COMPONENT)
-        .fetch_optional(connection)
-        .await?
-        .ok_or(Error::NotFound)
+    query(
+        connection.executor(),
+        Statement::new(
+            sql,
+            "SELECT * FROM gesang_configuration_streams WHERE scope_key=$1 AND component=$2",
+        ),
+    )
+    .bind(scope.key()?)
+    .bind(T::COMPONENT)
+    .fetch_optional()
+    .await?
+    .ok_or(Error::NotFound)
 }
 
 async fn published<T: Configuration>(
-    connection: &mut PgConnection,
+    connection: &mut CoordinationTransaction<'_, '_>,
     stream_id: Uuid,
     number: i64,
     scope: &ConfigurationScope,
 ) -> Result<ConfigurationRevision<T>> {
-    let row = sqlx::query("SELECT * FROM gesang_configuration_revisions WHERE stream_id=$1 AND revision=$2 AND published_at IS NOT NULL")
-        .bind(stream_id).bind(number).fetch_optional(connection).await?.ok_or(Error::NotFound)?;
+    let row = query(connection.executor(), "SELECT * FROM gesang_configuration_revisions WHERE stream_id=$1 AND revision=$2 AND published_at IS NOT NULL")
+    .bind(stream_id)
+    .bind(number)
+    .fetch_optional().await?.ok_or(Error::NotFound)?;
     revision::<T>(&row, scope)
 }
 
 fn revision<T: Configuration>(
-    row: &PgRow,
+    row: &Row,
     scope: &ConfigurationScope,
 ) -> Result<ConfigurationRevision<T>> {
     if row.try_get::<i64, _>("schema_version")? != i64::from(T::SCHEMA_VERSION)
@@ -502,26 +576,27 @@ fn revision<T: Configuration>(
         values: value,
         secrets,
         rollback_of: row.try_get("rollback_of")?,
-        prepared_at: row.try_get("prepared_at")?,
-        published_at: row.try_get("published_at")?,
+        prepared_at: row.timestamp("prepared_at")?,
+        published_at: row.optional_timestamp("published_at")?,
     })
 }
 
 async fn event(
-    connection: &mut PgConnection,
+    connection: &mut CoordinationTransaction<'_, '_>,
     stream_id: Uuid,
     kind: &str,
     actor: &Value,
     detail: Value,
 ) -> Result<()> {
-    sqlx::query(
+    query(
+        connection.executor(),
         "INSERT INTO gesang_configuration_events(stream_id,kind,actor,detail) VALUES($1,$2,$3,$4)",
     )
     .bind(stream_id)
     .bind(kind)
     .bind(actor)
     .bind(detail)
-    .execute(connection)
+    .execute()
     .await?;
     Ok(())
 }

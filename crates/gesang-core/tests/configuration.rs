@@ -90,6 +90,10 @@ impl Fixture {
         bootstrap.close().await;
         let store = Store::new(pool, PayloadKey::new([42; 32]));
         store.migrate().await.unwrap();
+        Self::from_store(store).await
+    }
+
+    async fn from_store(store: Store) -> Self {
         let owner = store
             .bind_owner(&VerifiedIdentity {
                 issuer: "test".into(),
@@ -553,7 +557,31 @@ impl EngineBridge for NoExecution {
 #[tokio::test]
 #[ignore = "requires a real isolated transactional database"]
 async fn kernel_adopts_new_runtime_policy_without_reconstruction_or_duplicate_adoption_events() {
-    let fixture = Fixture::new().await;
+    assert_kernel_adopts_new_runtime_policy(Fixture::new().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_kernel_adopts_new_runtime_policy() {
+    let path = std::env::temp_dir().join(format!("gesang-configuration-{}.sqlite", Uuid::new_v4()));
+    let store = Store::open_sqlite(&path, PayloadKey::new([42; 32]))
+        .await
+        .unwrap();
+    assert_kernel_adopts_new_runtime_policy(Fixture::from_store(store).await).await;
+}
+
+async fn adopted_event_count(store: &Store) -> i64 {
+    const COUNT: &str = "SELECT count(*) FROM gesang_configuration_events WHERE kind='adopted'";
+    if let Some(pool) = store.sqlite_pool() {
+        sqlx::query_scalar(COUNT).fetch_one(pool).await.unwrap()
+    } else {
+        sqlx::query_scalar(COUNT)
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+}
+
+async fn assert_kernel_adopts_new_runtime_policy(fixture: Fixture) {
     let access = ConfigurationAccess::Administrator(VerifiedIdentity {
         issuer: "trusted-administrator".into(),
         subject: "operator".into(),
@@ -616,15 +644,23 @@ async fn kernel_adopts_new_runtime_policy_without_reconstruction_or_duplicate_ad
         .unwrap();
     assert_eq!(kernel.ensure_runtime(agent.id).await.unwrap(), runtime);
     assert!(*provider.retained.lock().unwrap().last().unwrap() > before);
-    let adoptions: Vec<i64> = sqlx::query_scalar("SELECT a.revision FROM gesang_configuration_adoptions a JOIN gesang_configuration_streams s ON s.id=a.stream_id WHERE s.component=$1")
-        .bind(RuntimePolicy::COMPONENT).fetch_all(fixture.store.pool()).await.unwrap();
-    assert_eq!(adoptions, vec![2]);
-    let events: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM gesang_configuration_events WHERE kind='adopted'")
-            .fetch_one(fixture.store.pool())
+    const ADOPTIONS: &str = "SELECT a.revision FROM gesang_configuration_adoptions a
+        JOIN gesang_configuration_streams s ON s.id=a.stream_id WHERE s.component=$1";
+    let adoptions: Vec<i64> = if let Some(pool) = fixture.store.sqlite_pool() {
+        sqlx::query_scalar(ADOPTIONS)
+            .bind(RuntimePolicy::COMPONENT)
+            .fetch_all(pool)
             .await
-            .unwrap();
-    assert_eq!(events, 2);
+            .unwrap()
+    } else {
+        sqlx::query_scalar(ADOPTIONS)
+            .bind(RuntimePolicy::COMPONENT)
+            .fetch_all(fixture.store.pool())
+            .await
+            .unwrap()
+    };
+    assert_eq!(adoptions, vec![2]);
+    assert_eq!(adopted_event_count(&fixture.store).await, 2);
     let consumer = Uuid::new_v4();
     let (a, b) = tokio::join!(
         fixture
@@ -636,12 +672,15 @@ async fn kernel_adopts_new_runtime_policy_without_reconstruction_or_duplicate_ad
     );
     assert_eq!(a.unwrap().revision, 2);
     assert_eq!(b.unwrap().revision, 2);
-    let events: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM gesang_configuration_events WHERE kind='adopted'")
-            .fetch_one(fixture.store.pool())
+    assert_eq!(
+        fixture
+            .center
+            .adoption_revision::<RuntimePolicy>(&access, &scope, consumer)
             .await
-            .unwrap();
-    assert_eq!(events, 3);
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(adopted_event_count(&fixture.store).await, 3);
     let mut invalid = first;
     invalid.operation_id = Uuid::new_v4();
     invalid.expected_revision = Some(2);

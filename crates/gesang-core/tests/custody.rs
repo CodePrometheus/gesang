@@ -56,6 +56,10 @@ impl Fixture {
         bootstrap.close().await;
         let store = Store::new(pool, PayloadKey::new([42; 32]));
         store.migrate().await.unwrap();
+        Self::from_store(store).await
+    }
+
+    async fn from_store(store: Store) -> Self {
         let owner = store
             .bind_owner(&VerifiedIdentity {
                 issuer: "test".into(),
@@ -573,7 +577,19 @@ async fn revocation_invalidates_cached_runtime_and_recovers_retirement_before_re
 #[tokio::test]
 #[ignore = "requires a real isolated transactional database"]
 async fn concurrent_enrollment_has_one_winner_and_unadmitted_launches_require_retirement() {
-    let fixture = Fixture::new().await;
+    assert_concurrent_enrollment_and_retirement(Fixture::new().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_concurrent_enrollment_and_retirement() {
+    let path = std::env::temp_dir().join(format!("gesang-custody-{}.sqlite", Uuid::new_v4()));
+    let store = Store::open_sqlite(&path, PayloadKey::new([42; 32]))
+        .await
+        .unwrap();
+    assert_concurrent_enrollment_and_retirement(Fixture::from_store(store).await).await;
+}
+
+async fn assert_concurrent_enrollment_and_retirement(fixture: Fixture) {
     let verifier = Verifier(AtomicUsize::new(0));
     let a = enrollment(0);
     let b = enrollment(0);

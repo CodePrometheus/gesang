@@ -1,23 +1,18 @@
 use async_trait::async_trait;
 use gesang_plugins::{PinError, PinStore, PinSubject, VersionPin};
-use sqlx::{PgConnection, types::Json};
+use sqlx::types::Json;
 use uuid::Uuid;
 
-use crate::Store;
-
-struct PinRow {
-    subject: Json<PinSubject>,
-    reference_id: Uuid,
-    package: String,
-    version: String,
-    digest: String,
-}
+use crate::{
+    CoordinationTransaction, Store,
+    store::database::{Row, query},
+};
 
 #[async_trait]
 impl PinStore for Store {
     async fn pin(&self, pin: VersionPin) -> std::result::Result<VersionPin, PinError> {
-        let mut tx = self.begin().await.map_err(storage_error)?;
-        let existing = pin_in(&mut tx, pin).await?;
+        let mut tx = self.database.begin().await.map_err(storage_error)?;
+        let existing = pin_in(&mut tx.coordination(), pin).await?;
         tx.commit().await.map_err(storage_error)?;
         Ok(existing)
     }
@@ -28,21 +23,20 @@ impl PinStore for Store {
         reference_id: Uuid,
         package: &str,
     ) -> std::result::Result<Option<VersionPin>, PinError> {
-        let row = sqlx::query_as!(
-            PinRow,
-            r#"
-            SELECT subject AS "subject: _", reference_id, package, version, digest
-            FROM gesang_package_pins
-            WHERE subject = $1 AND reference_id = $2 AND package = $3
-            "#,
-            Json(subject) as _,
-            reference_id,
-            package,
+        query(
+            self.database.executor(),
+            "SELECT subject, reference_id, package, version, digest
+             FROM gesang_package_pins WHERE subject=$1 AND reference_id=$2 AND package=$3",
         )
-        .fetch_optional(self.pool())
+        .bind(Json(subject))
+        .bind(reference_id)
+        .bind(package)
+        .fetch_optional()
         .await
-        .map_err(storage_error)?;
-        Ok(row.map(Into::into))
+        .map_err(storage_error)?
+        .as_ref()
+        .map(read_pin)
+        .transpose()
     }
 
     async fn list(
@@ -50,21 +44,19 @@ impl PinStore for Store {
         subject: &PinSubject,
         reference_id: Uuid,
     ) -> std::result::Result<Vec<VersionPin>, PinError> {
-        let rows = sqlx::query_as!(
-            PinRow,
-            r#"
-            SELECT subject AS "subject: _", reference_id, package, version, digest
-            FROM gesang_package_pins
-            WHERE subject = $1 AND reference_id = $2
-            ORDER BY package
-            "#,
-            Json(subject) as _,
-            reference_id,
+        query(
+            self.database.executor(),
+            "SELECT subject, reference_id, package, version, digest
+             FROM gesang_package_pins WHERE subject=$1 AND reference_id=$2 ORDER BY package",
         )
-        .fetch_all(self.pool())
+        .bind(Json(subject))
+        .bind(reference_id)
+        .fetch_all()
         .await
-        .map_err(storage_error)?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        .map_err(storage_error)?
+        .iter()
+        .map(read_pin)
+        .collect()
     }
 
     async fn unpin(
@@ -73,17 +65,15 @@ impl PinStore for Store {
         reference_id: Uuid,
         package: &str,
     ) -> std::result::Result<(), PinError> {
-        let mut tx = self.begin().await.map_err(storage_error)?;
-        sqlx::query!(
-            r#"
-            DELETE FROM gesang_package_pins
-            WHERE subject = $1 AND reference_id = $2 AND package = $3
-            "#,
-            Json(subject) as _,
-            reference_id,
-            package,
+        let mut tx = self.database.begin().await.map_err(storage_error)?;
+        query(
+            tx.executor(),
+            "DELETE FROM gesang_package_pins WHERE subject=$1 AND reference_id=$2 AND package=$3",
         )
-        .execute(&mut *tx)
+        .bind(Json(subject))
+        .bind(reference_id)
+        .bind(package)
+        .execute()
         .await
         .map_err(storage_error)?;
         tx.commit().await.map_err(storage_error)?;
@@ -92,28 +82,26 @@ impl PinStore for Store {
 }
 
 pub(crate) async fn pin_in(
-    connection: &mut PgConnection,
+    connection: &mut CoordinationTransaction<'_, '_>,
     pin: VersionPin,
 ) -> std::result::Result<VersionPin, PinError> {
-    let row = sqlx::query_as!(
-        PinRow,
-        r#"
-        INSERT INTO gesang_package_pins (subject, reference_id, package, version, digest)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (subject, reference_id, package)
-        DO UPDATE SET subject = EXCLUDED.subject
-        RETURNING subject AS "subject: _", reference_id, package, version, digest
-        "#,
-        Json(&pin.subject) as _,
-        pin.reference_id,
-        &pin.package,
-        &pin.version,
-        &pin.digest,
+    let row = query(
+        connection.executor(),
+        "INSERT INTO gesang_package_pins (subject, reference_id, package, version, digest)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (subject, reference_id, package)
+         DO UPDATE SET subject = EXCLUDED.subject
+         RETURNING subject, reference_id, package, version, digest",
     )
-    .fetch_one(connection)
+    .bind(Json(&pin.subject))
+    .bind(pin.reference_id)
+    .bind(&pin.package)
+    .bind(&pin.version)
+    .bind(&pin.digest)
+    .fetch_one()
     .await
     .map_err(storage_error)?;
-    let existing: VersionPin = row.into();
+    let existing = read_pin(&row)?;
     if existing != pin {
         return Err(PinError::Conflict {
             existing: Box::new(existing),
@@ -123,16 +111,17 @@ pub(crate) async fn pin_in(
     Ok(existing)
 }
 
-impl From<PinRow> for VersionPin {
-    fn from(row: PinRow) -> Self {
-        Self {
-            subject: row.subject.0,
-            reference_id: row.reference_id,
-            package: row.package,
-            version: row.version,
-            digest: row.digest,
-        }
-    }
+fn read_pin(row: &Row) -> std::result::Result<VersionPin, PinError> {
+    let read = || -> sqlx::Result<VersionPin> {
+        Ok(VersionPin {
+            subject: row.try_get::<Json<PinSubject>, _>("subject")?.0,
+            reference_id: row.try_get("reference_id")?,
+            package: row.try_get("package")?,
+            version: row.try_get("version")?,
+            digest: row.try_get("digest")?,
+        })
+    };
+    read().map_err(storage_error)
 }
 
 fn storage_error(error: impl std::fmt::Display) -> PinError {

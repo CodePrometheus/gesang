@@ -1,5 +1,6 @@
+use crate::CoordinationTransaction;
+use crate::store::database::{Row, query, query_scalar, statement};
 use serde_json::json;
-use sqlx::{PgConnection, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use super::{
@@ -17,11 +18,24 @@ impl Store {
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         agent_id: Uuid,
+        runtime_id: Uuid,
+    ) -> Result<InstanceRecord> {
+        self.recorded_instance_coordination_in(&mut tx.into(), agent_id, runtime_id)
+            .await
+    }
+
+    /// Runs the same check in the host's active coordination transaction.
+    pub async fn recorded_instance_coordination_in(
+        &self,
+        tx: &mut CoordinationTransaction<'_, '_>,
+        agent_id: Uuid,
         instance_id: Uuid,
     ) -> Result<InstanceRecord> {
-        crate::store::verify_transaction(tx).await?;
-        let row = sqlx::query("SELECT a.*,i.id AS recorded_id,i.generation AS recorded_generation,i.locator AS recorded_locator,i.plan AS recorded_plan,i.phase AS recorded_phase FROM gesang_agents a JOIN gesang_instance_intents i ON i.agent_id=a.id WHERE a.id=$1 AND i.id=$2 AND i.locator IS NOT NULL FOR SHARE OF a,i")
-            .bind(agent_id).bind(instance_id).fetch_optional(&mut **tx).await?.ok_or(Error::NotFound)?;
+        self.database.verify_transaction(tx).await?;
+        let row = query(tx.executor(), statement!("SELECT a.*,i.id AS recorded_id,i.generation AS recorded_generation,i.locator AS recorded_locator,i.plan AS recorded_plan,i.phase AS recorded_phase FROM gesang_agents a JOIN gesang_instance_intents i ON i.agent_id=a.id WHERE a.id=$1 AND i.id=$2 AND i.locator IS NOT NULL", [" FOR SHARE OF a,i", ""]))
+    .bind(agent_id)
+    .bind(instance_id)
+    .fetch_optional().await?.ok_or(Error::NotFound)?;
         let binding = crate::store::read_binding(tx, &row).await?;
         Ok(InstanceRecord {
             runtime: Runtime {
@@ -42,10 +56,12 @@ impl Store {
         &self,
         claim: &RuntimeClaim,
     ) -> Result<Option<CompletedMigration>> {
-        let mut tx = self.pool().begin().await?;
-        verify_claim(&mut tx, claim).await?;
-        let row = sqlx::query("SELECT id,generation,locator,plan,migration_head FROM gesang_instance_intents WHERE agent_id=$1 AND generation<=$2 AND plan->>'purpose'='migration' AND phase='stopped' AND migration_head IS NOT NULL AND problem IS NULL ORDER BY generation DESC LIMIT 1")
-            .bind(claim.agent.id).bind(claim.generation).fetch_optional(&mut *tx).await?;
+        let mut tx = self.database.begin_read().await?;
+        verify_claim(&mut tx.coordination(), claim).await?;
+        let row = query(tx.executor(), "SELECT id,generation,locator,plan,migration_head FROM gesang_instance_intents WHERE agent_id=$1 AND generation<=$2 AND plan->>'purpose'='migration' AND phase='stopped' AND migration_head IS NOT NULL AND problem IS NULL ORDER BY generation DESC LIMIT 1")
+    .bind(claim.agent.id)
+    .bind(claim.generation)
+    .fetch_optional().await?;
         let completed = row
             .map(|row| -> Result<CompletedMigration> {
                 Ok(CompletedMigration {
@@ -67,14 +83,15 @@ impl Store {
 
     /// Reads a persisted attempt under the current controller claim without replanning it.
     pub async fn instance_intent(&self, claim: &RuntimeClaim) -> Result<Option<InstanceIntent>> {
-        let mut tx = self.pool().begin().await?;
-        verify_claim(&mut tx, claim).await?;
-        let row = sqlx::query(
+        let mut tx = self.database.begin_read().await?;
+        verify_claim(&mut tx.coordination(), claim).await?;
+        let row = query(
+            tx.executor(),
             "SELECT * FROM gesang_instance_intents WHERE agent_id=$1 AND generation=$2",
         )
         .bind(claim.agent.id)
         .bind(claim.generation)
-        .fetch_optional(&mut *tx)
+        .fetch_optional()
         .await?;
         let intent = row
             .as_ref()
@@ -91,32 +108,37 @@ impl Store {
         plan: &InstancePlan,
     ) -> Result<InstanceIntent> {
         plan.validate()?;
-        let mut tx = self.begin().await?;
-        let agent = verify_claim(&mut tx, claim).await?;
+        let mut tx = self.database.begin().await?;
+        let agent = verify_claim(&mut tx.coordination(), claim).await?;
         if crate::store::read_runtime(&agent)? != claim.previous {
             return Err(Error::StaleGeneration);
         }
-        let row = sqlx::query("INSERT INTO gesang_instance_intents(id,agent_id,generation,plan,phase) VALUES($1,$2,$3,$4,'allocating') ON CONFLICT(agent_id,generation) DO NOTHING RETURNING *")
-            .bind(Uuid::new_v4()).bind(claim.agent.id).bind(claim.generation).bind(serde_json::to_value(plan)?)
-            .fetch_optional(&mut *tx).await?;
+        let row = query(tx.executor(), "INSERT INTO gesang_instance_intents(id,agent_id,generation,plan,phase) VALUES($1,$2,$3,$4,'allocating') ON CONFLICT(agent_id,generation) DO NOTHING RETURNING *")
+    .bind(Uuid::new_v4())
+    .bind(claim.agent.id)
+    .bind(claim.generation)
+    .bind(serde_json::to_value(plan)?)
+    .fetch_optional().await?;
         let intent = match row {
             Some(row) => {
-                let pending_initialization: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gesang_initializations WHERE agent_id=$1 AND state='pending')")
-                    .bind(claim.agent.id).fetch_one(&mut *tx).await?;
+                let pending_initialization: bool = query_scalar(tx.executor(), "SELECT EXISTS(SELECT 1 FROM gesang_initializations WHERE agent_id=$1 AND state='pending')")
+    .bind(claim.agent.id)
+    .fetch_one().await?;
                 if pending_initialization != (plan.purpose == InstancePurpose::Initialization) {
                     return Err(Error::Forbidden);
                 }
                 let intent = read_intent(&row, claim)?;
-                event(&mut tx, &intent, json!({})).await?;
+                event(&mut tx.coordination(), &intent, json!({})).await?;
                 intent
             }
             None => {
-                let row = sqlx::query(
+                let row = query(
+                    tx.executor(),
                     "SELECT * FROM gesang_instance_intents WHERE agent_id=$1 AND generation=$2",
                 )
                 .bind(claim.agent.id)
                 .bind(claim.generation)
-                .fetch_one(&mut *tx)
+                .fetch_one()
                 .await?;
                 let intent = read_intent(&row, claim)?;
                 if intent.plan != *plan {
@@ -125,16 +147,16 @@ impl Store {
                 intent
             }
         };
-        crate::store::schedule(&mut tx, claim.agent.id, chrono::Utc::now()).await?;
+        crate::store::schedule(&mut tx.coordination(), claim.agent.id, None).await?;
         tx.commit().await?;
         Ok(intent)
     }
 
     /// Checks an exact persisted preparation attempt before a provider changes external resources.
     pub async fn verify_instance_intent(&self, intent: &InstanceIntent) -> Result<()> {
-        let mut tx = self.pool().begin().await?;
-        let agent = verify_claim(&mut tx, &intent.claim).await?;
-        check_intent(&mut tx, intent).await?;
+        let mut tx = self.database.begin_read().await?;
+        let agent = verify_claim(&mut tx.coordination(), &intent.claim).await?;
+        check_intent(&mut tx.coordination(), intent).await?;
         let expected = intent.runtime.as_ref().or(intent.claim.previous.as_ref());
         if crate::store::read_runtime(&agent)?.as_ref() != expected {
             return Err(Error::StaleGeneration);
@@ -164,24 +186,35 @@ impl Store {
             ) if previous.id == *id && previous.id != intent.id => {}
             _ => return Err(Error::FencingRequired),
         }
-        let mut tx = self.begin().await?;
-        let agent = verify_claim(&mut tx, &intent.claim).await?;
-        check_intent(&mut tx, intent).await?;
+        let mut tx = self.database.begin().await?;
+        let agent = verify_claim(&mut tx.coordination(), &intent.claim).await?;
+        check_intent(&mut tx.coordination(), intent).await?;
         if crate::store::read_runtime(&agent)? != intent.claim.previous {
             return Err(Error::StaleGeneration);
         }
-        sqlx::query("UPDATE gesang_agents SET runtime_id=$2,runtime_generation=$3,runtime_locator=$4 WHERE id=$1")
-            .bind(intent.claim.agent.id).bind(intent.id).bind(intent.claim.generation).bind(&admission.locator)
-            .execute(&mut *tx).await?;
+        query(tx.executor(), "UPDATE gesang_agents SET runtime_id=$2,runtime_generation=$3,runtime_locator=$4 WHERE id=$1")
+    .bind(intent.claim.agent.id)
+    .bind(intent.id)
+    .bind(intent.claim.generation)
+    .bind(&admission.locator)
+    .execute().await?;
         let phase = match intent.plan.purpose {
             InstancePurpose::Execution => InstancePhase::Starting,
             InstancePurpose::Initialization => InstancePhase::Initializing,
             InstancePurpose::Migration => InstancePhase::Migrating,
         };
-        let row = sqlx::query("UPDATE gesang_instance_intents SET phase=$2,locator=$3,revision=revision+1,updated_at=clock_timestamp() WHERE id=$1 RETURNING *")
-            .bind(intent.id).bind(phase.as_str()).bind(&admission.locator).fetch_one(&mut *tx).await?;
+        let row = query(tx.executor(), statement!("UPDATE gesang_instance_intents SET phase=$2,locator=$3,revision=revision+1,updated_at=", clock, " WHERE id=$1 RETURNING *"))
+    .bind(intent.id)
+    .bind(phase.as_str())
+    .bind(&admission.locator)
+    .fetch_one().await?;
         let updated = read_intent(&row, &intent.claim)?;
-        event(&mut tx, &updated, json!({"writerAdmitted":true})).await?;
+        event(
+            &mut tx.coordination(),
+            &updated,
+            json!({"writerAdmitted":true}),
+        )
+        .await?;
         tx.commit().await?;
         Ok(updated)
     }
@@ -217,17 +250,27 @@ impl Store {
                 "invalid instance lifecycle transition".into(),
             ));
         }
-        let mut tx = self.begin().await?;
-        verify_claim(&mut tx, &intent.claim).await?;
-        check_intent(&mut tx, intent).await?;
+        let mut tx = self.database.begin().await?;
+        verify_claim(&mut tx.coordination(), &intent.claim).await?;
+        check_intent(&mut tx.coordination(), intent).await?;
         let runtime = intent.runtime.as_ref().ok_or(Error::FencingRequired)?;
-        crate::anchor::verify_writer(&mut tx, runtime).await?;
-        let row = sqlx::query("UPDATE gesang_instance_intents SET phase=$2,revision=revision+1,updated_at=clock_timestamp() WHERE id=$1 RETURNING *")
-            .bind(intent.id).bind(next.as_str()).fetch_one(&mut *tx).await?;
+        crate::anchor::verify_writer(&mut tx.coordination(), runtime).await?;
+        let row = query(
+            tx.executor(),
+            statement!(
+                "UPDATE gesang_instance_intents SET phase=$2,revision=revision+1,updated_at=",
+                clock,
+                " WHERE id=$1 RETURNING *"
+            ),
+        )
+        .bind(intent.id)
+        .bind(next.as_str())
+        .fetch_one()
+        .await?;
         let updated = read_intent(&row, &intent.claim)?;
-        event(&mut tx, &updated, json!({})).await?;
+        event(&mut tx.coordination(), &updated, json!({})).await?;
         if next == InstancePhase::Ready {
-            crate::store::schedule(&mut tx, runtime.agent_id, chrono::Utc::now()).await?;
+            crate::store::schedule(&mut tx.coordination(), runtime.agent_id, None).await?;
         }
         tx.commit().await?;
         Ok(updated)
@@ -256,15 +299,19 @@ impl Store {
                 "storage completion requires its active preparation writer".into(),
             ));
         }
-        let mut tx = self.begin().await?;
-        verify_claim(&mut tx, &intent.claim).await?;
-        check_intent(&mut tx, intent).await?;
+        let mut tx = self.database.begin().await?;
+        verify_claim(&mut tx.coordination(), &intent.claim).await?;
+        check_intent(&mut tx.coordination(), intent).await?;
         if let Some(head) = completed_head {
-            let row = sqlx::query(
-                "SELECT sequence,digest,pending_id FROM gesang_anchors WHERE agent_id=$1 FOR SHARE",
+            let row = query(
+                tx.executor(),
+                statement!(
+                    "SELECT sequence,digest,pending_id FROM gesang_anchors WHERE agent_id=$1",
+                    [" FOR SHARE", ""]
+                ),
             )
             .bind(intent.claim.agent.id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional()
             .await?
             .ok_or(Error::FreshnessMismatch)?;
             if row.try_get::<i64, _>("sequence")? != head.sequence
@@ -274,9 +321,11 @@ impl Store {
                 return Err(Error::FreshnessMismatch);
             }
             if intent.plan.purpose == InstancePurpose::Initialization {
-                let completed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gesang_initializations WHERE agent_id=$1 AND state='completed' AND completed_runtime=$2 AND completed_head=$3)")
-                    .bind(intent.claim.agent.id).bind(serde_json::to_value(intent.runtime.as_ref().ok_or(Error::FencingRequired)?)?)
-                    .bind(serde_json::to_value(head)?).fetch_one(&mut *tx).await?;
+                let completed: bool = query_scalar(tx.executor(), "SELECT EXISTS(SELECT 1 FROM gesang_initializations WHERE agent_id=$1 AND state='completed' AND completed_runtime=$2 AND completed_head=$3)")
+    .bind(intent.claim.agent.id)
+    .bind(serde_json::to_value(intent.runtime.as_ref().ok_or(Error::FencingRequired)?)?)
+    .bind(serde_json::to_value(head)?)
+    .fetch_one().await?;
                 if !completed {
                     return Err(Error::FreshnessMismatch);
                 }
@@ -284,12 +333,14 @@ impl Store {
         }
         let migration_head =
             completed_head.filter(|_| intent.plan.purpose == InstancePurpose::Migration);
-        let row = sqlx::query("UPDATE gesang_instance_intents SET phase='stopped',migration_head=$2,problem=$3,revision=revision+1,updated_at=clock_timestamp() WHERE id=$1 RETURNING *")
-            .bind(intent.id).bind(migration_head.map(serde_json::to_value).transpose()?)
-            .bind(problem.map(serde_json::to_value).transpose()?).fetch_one(&mut *tx).await?;
+        let row = query(tx.executor(), statement!("UPDATE gesang_instance_intents SET phase='stopped',migration_head=$2,problem=$3,revision=revision+1,updated_at=", clock, " WHERE id=$1 RETURNING *"))
+    .bind(intent.id)
+    .bind(migration_head.map(serde_json::to_value).transpose()?)
+    .bind(problem.map(serde_json::to_value).transpose()?)
+    .fetch_one().await?;
         let updated = read_intent(&row, &intent.claim)?;
         event(
-            &mut tx,
+            &mut tx.coordination(),
             &updated,
             json!({"migrationHead":migration_head,"initializationHead":completed_head.filter(|_| intent.plan.purpose == InstancePurpose::Initialization),"problem":problem}),
         )
@@ -300,15 +351,17 @@ impl Store {
 
     /// Reads admitted writer identity even while execution remains paused for preparation.
     pub async fn writer(&self, agent_id: Uuid) -> Result<Runtime> {
-        let row = sqlx::query("SELECT a.* FROM gesang_agents a JOIN gesang_instance_intents i ON i.id=a.runtime_id AND i.agent_id=a.id AND i.generation=a.generation AND i.locator=a.runtime_locator WHERE a.id=$1 AND a.runtime_generation=a.generation AND a.lease_until>clock_timestamp() AND i.phase NOT IN ('allocating','stopped')")
-            .bind(agent_id).fetch_optional(self.pool()).await?.ok_or(Error::StaleGeneration)?;
+        let row = query(self.database.executor(), statement!("SELECT a.* FROM gesang_agents a JOIN gesang_instance_intents i ON i.id=a.runtime_id AND i.agent_id=a.id AND i.generation=a.generation AND i.locator=a.runtime_locator WHERE a.id=$1 AND a.runtime_generation=a.generation AND a.lease_until>", clock, " AND i.phase NOT IN ('allocating','stopped')"))
+    .bind(agent_id)
+    .fetch_optional().await?.ok_or(Error::StaleGeneration)?;
         crate::store::read_runtime(&row)?.ok_or(Error::FencingRequired)
     }
 
     /// Verifies a current admitted writer without granting execution-ready routing.
     pub async fn verify_writer(&self, runtime: &Runtime) -> Result<()> {
-        let mut tx = self.pool().begin().await?;
-        self.verify_writer_in(&mut tx, runtime).await?;
+        let mut tx = self.database.begin_read().await?;
+        self.verify_writer_coordination_in(&mut tx.coordination(), runtime)
+            .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -322,14 +375,24 @@ impl Store {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         runtime: &Runtime,
     ) -> Result<()> {
-        crate::store::verify_transaction(tx).await?;
+        self.verify_writer_coordination_in(&mut tx.into(), runtime)
+            .await
+    }
+
+    /// Runs the same check in the host's active coordination transaction.
+    pub async fn verify_writer_coordination_in(
+        &self,
+        tx: &mut CoordinationTransaction<'_, '_>,
+        runtime: &Runtime,
+    ) -> Result<()> {
+        self.database.verify_transaction(tx).await?;
         crate::anchor::verify_writer(tx, runtime).await
     }
 
     /// Requires current execution readiness without accepting a migration-purpose credential.
     pub async fn verify_execution(&self, runtime: &Runtime) -> Result<()> {
-        let mut tx = self.pool().begin().await?;
-        crate::anchor::verify_execution(&mut tx, runtime).await?;
+        let mut tx = self.database.begin_read().await?;
+        crate::anchor::verify_execution(&mut tx.coordination(), runtime).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -339,12 +402,15 @@ impl Store {
         &self,
         runtime: &Runtime,
     ) -> Result<(InstancePurpose, InstancePhase)> {
-        let mut tx = self.pool().begin().await?;
-        crate::anchor::verify_writer(&mut tx, runtime).await?;
-        let row = sqlx::query("SELECT plan,phase FROM gesang_instance_intents WHERE id=$1")
-            .bind(runtime.id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let mut tx = self.database.begin_read().await?;
+        crate::anchor::verify_writer(&mut tx.coordination(), runtime).await?;
+        let row = query(
+            tx.executor(),
+            "SELECT plan,phase FROM gesang_instance_intents WHERE id=$1",
+        )
+        .bind(runtime.id)
+        .fetch_one()
+        .await?;
         let plan: InstancePlan = serde_json::from_value(row.try_get("plan")?)?;
         let phase = InstancePhase::from_str(row.try_get("phase")?)?;
         tx.commit().await?;
@@ -352,10 +418,16 @@ impl Store {
     }
 }
 
-async fn verify_claim(connection: &mut PgConnection, claim: &RuntimeClaim) -> Result<PgRow> {
-    let row = sqlx::query("SELECT * FROM gesang_agents WHERE id=$1 AND controller_id=$2 AND generation=$3 AND lease_until >= $4 AND $4>clock_timestamp() FOR UPDATE")
-        .bind(claim.agent.id).bind(claim.controller_id).bind(claim.generation).bind(claim.expires_at)
-        .fetch_optional(&mut *connection).await?.ok_or(Error::StaleGeneration)?;
+async fn verify_claim(
+    connection: &mut CoordinationTransaction<'_, '_>,
+    claim: &RuntimeClaim,
+) -> Result<Row> {
+    let row = query(connection.executor(), statement!("SELECT * FROM gesang_agents WHERE id=$1 AND controller_id=$2 AND generation=$3 AND lease_until >= $4 AND $4>", clock, [" FOR UPDATE", ""]))
+    .bind(claim.agent.id)
+    .bind(claim.controller_id)
+    .bind(claim.generation)
+    .bind_timestamp(claim.expires_at)
+    .fetch_optional().await?.ok_or(Error::StaleGeneration)?;
     let binding = crate::store::read_binding(connection, &row).await?;
     if binding.agent != claim.agent
         || binding.engine_owner != claim.engine_owner
@@ -367,10 +439,23 @@ async fn verify_claim(connection: &mut PgConnection, claim: &RuntimeClaim) -> Re
     Ok(row)
 }
 
-async fn check_intent(connection: &mut PgConnection, intent: &InstanceIntent) -> Result<()> {
-    let row = sqlx::query("SELECT * FROM gesang_instance_intents WHERE id=$1 AND agent_id=$2 AND generation=$3 FOR UPDATE")
-        .bind(intent.id).bind(intent.claim.agent.id).bind(intent.claim.generation)
-        .fetch_optional(connection).await?.ok_or(Error::StaleGeneration)?;
+async fn check_intent(
+    connection: &mut CoordinationTransaction<'_, '_>,
+    intent: &InstanceIntent,
+) -> Result<()> {
+    let row = query(
+        connection.executor(),
+        statement!(
+            "SELECT * FROM gesang_instance_intents WHERE id=$1 AND agent_id=$2 AND generation=$3",
+            [" FOR UPDATE", ""]
+        ),
+    )
+    .bind(intent.id)
+    .bind(intent.claim.agent.id)
+    .bind(intent.claim.generation)
+    .fetch_optional()
+    .await?
+    .ok_or(Error::StaleGeneration)?;
     let actual = read_intent(&row, &intent.claim)?;
     if actual.plan != intent.plan
         || actual.phase != intent.phase
@@ -384,7 +469,7 @@ async fn check_intent(connection: &mut PgConnection, intent: &InstanceIntent) ->
     Ok(())
 }
 
-fn read_intent(row: &PgRow, claim: &RuntimeClaim) -> Result<InstanceIntent> {
+fn read_intent(row: &Row, claim: &RuntimeClaim) -> Result<InstanceIntent> {
     let id = row.try_get("id")?;
     let locator: Option<String> = row.try_get("locator")?;
     Ok(InstanceIntent {
@@ -412,18 +497,19 @@ fn read_intent(row: &PgRow, claim: &RuntimeClaim) -> Result<InstanceIntent> {
 }
 
 async fn event(
-    connection: &mut PgConnection,
+    connection: &mut CoordinationTransaction<'_, '_>,
     intent: &InstanceIntent,
     detail: serde_json::Value,
 ) -> Result<()> {
-    sqlx::query(
+    query(
+        connection.executor(),
         "INSERT INTO gesang_instance_events(instance_id,revision,phase,detail) VALUES($1,$2,$3,$4)",
     )
     .bind(intent.id)
     .bind(intent.revision)
     .bind(intent.phase.as_str())
     .bind(detail)
-    .execute(connection)
+    .execute()
     .await?;
     Ok(())
 }
