@@ -1,6 +1,9 @@
 //! Real configuration publication, custody, and adoption checks.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "configuration/host-coordination.rs"]
+mod host_coordination;
+
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
 use gesang_core::{
@@ -610,7 +613,11 @@ async fn assert_kernel_adopts_new_runtime_policy(fixture: Fixture) {
         .await
         .unwrap();
     let provider = Arc::new(Provider::default());
-    let storage: Arc<dyn gesang_core::CoordinationStore> = Arc::new(fixture.store.clone());
+    let host = Arc::new(host_coordination::HostCoordination {
+        store: fixture.store.clone(),
+        verified: Mutex::new(None),
+    });
+    let storage: Arc<dyn gesang_core::CoordinationStore> = host.clone();
     let kernel = Kernel::with_coordination_store_and_configuration(
         storage,
         provider.clone(),
@@ -629,6 +636,7 @@ async fn assert_kernel_adopts_new_runtime_policy(fixture: Fixture) {
         .await
         .unwrap();
     let runtime = kernel.ensure_runtime(agent.id).await.unwrap();
+    assert_eq!(host.verified.lock().unwrap().as_ref(), Some(&runtime));
     let before = provider.retained.lock().unwrap()[0];
     first.operation_id = Uuid::new_v4();
     first.expected_revision = Some(1);
