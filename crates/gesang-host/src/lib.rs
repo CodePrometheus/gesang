@@ -8,6 +8,9 @@ mod sandbox;
 
 pub use control::{ControlPlane, ControlPolicy, ExecutionAction};
 pub use credentials::{ControlKey, ControlToken};
-pub use engine::{EngineAdapter, EngineConnectionPolicy, EngineConnector, EngineObservation};
+pub use engine::{
+    ArtifactDownload, ArtifactRead, EngineAdapter, EngineConnectionPolicy, EngineConnector,
+    EngineObservation,
+};
 pub use jobs::{JobAuthority, JobControlKey, JobPolicy, TransactionalJobPolicy};
 pub use sandbox::SandboxGateway;

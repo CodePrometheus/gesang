@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     future::Future,
+    num::NonZeroUsize,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -10,10 +12,11 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chopin_protocol::{
     ChordClient, ConversationState, ConversationSummary, CorrectionKind, EngineCommand,
     GoalCommand, GoalPage, GoalSnapshot, HeldChange, LoopChange, LoopSettings, LoopStanding,
-    ModelChoices, ProtocolError, StateObserver, TranscriptPage,
+    ModelChoices, ProtocolError, PublishedArtifact, StateObserver, TranscriptPage,
 };
 use gesang_api::{ApiProblem, CommandAuthorization};
 use gesang_core::{
@@ -22,11 +25,34 @@ use gesang_core::{
 };
 use jiff::Timestamp;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use uuid::Uuid;
 
 mod observation;
 pub use observation::EngineObservation;
+
+/// The checked bytes from one original publication.
+#[derive(Debug)]
+pub struct ArtifactDownload {
+    /// Source metadata for the exact publication.
+    pub metadata: PublishedArtifact,
+    /// Complete, validated file bytes.
+    pub bytes: Vec<u8>,
+    /// Verified binary SHA-256.
+    pub digest: [u8; 32],
+}
+
+/// Outcome of checking an original publication against the host's download policy.
+#[derive(Debug)]
+pub enum ArtifactRead {
+    /// The publication does not belong to this goal or has not finished.
+    Missing,
+    /// The announced file exceeded the host's limit before any page was read.
+    TooLarge,
+    /// The complete file has been validated.
+    Complete(ArtifactDownload),
+}
 
 /// Explicit host configuration for sequential execution RPC connections.
 #[derive(Clone, Debug)]
@@ -144,6 +170,101 @@ impl EngineAdapter {
         })
         .await
         .map_err(Error::from)
+    }
+
+    /// Lists immutable publications using the current fenced owner connection.
+    pub async fn goal_artifacts(
+        &self,
+        runtime: &Runtime,
+        goal_id: &str,
+    ) -> Result<Vec<PublishedArtifact>> {
+        let goal_id = goal_id.to_owned();
+        self.call(runtime, |client| {
+            Box::pin(async move { client.goal_artifacts(&goal_id).await })
+        })
+        .await
+        .map_err(Error::from)
+    }
+
+    /// Reads and verifies every page of the exact original publication before returning bytes.
+    pub async fn goal_artifact(
+        &self,
+        runtime: &Runtime,
+        goal_id: &str,
+        artifact_id: Uuid,
+        max_file_bytes: NonZeroUsize,
+    ) -> Result<ArtifactRead> {
+        let goal_id = goal_id.to_owned();
+        let artifact = self
+            .call(runtime, |client| {
+                Box::pin(async move {
+                    let Some(metadata) = client
+                        .goal_artifacts(&goal_id)
+                        .await?
+                        .into_iter()
+                        .find(|entry| entry.artifact_id == artifact_id)
+                    else {
+                        return Ok(ArtifactRead::Missing);
+                    };
+                    let Ok(size) = usize::try_from(metadata.size_bytes) else {
+                        return Ok(ArtifactRead::TooLarge);
+                    };
+                    if size > max_file_bytes.get() {
+                        return Ok(ArtifactRead::TooLarge);
+                    }
+                    let mut bytes = Vec::new();
+                    bytes
+                        .try_reserve_exact(size)
+                        .map_err(|_| ProtocolError::MessageTooLarge)?;
+                    let mut offset = 0;
+                    let mut digest = Sha256::new();
+                    loop {
+                        let page = client
+                            .goal_artifact_page(&goal_id, artifact_id, offset)
+                            .await?
+                            .ok_or(ProtocolError::InvalidState)?;
+                        let remaining = size - bytes.len();
+                        if page.data.len()
+                            > base64::encoded_len(remaining, false).unwrap_or(usize::MAX)
+                        {
+                            return Err(ProtocolError::InvalidState);
+                        }
+                        let decoded = URL_SAFE_NO_PAD
+                            .decode(&page.data)
+                            .map_err(|_| ProtocolError::InvalidState)?;
+                        let end = offset
+                            .checked_add(decoded.len() as u64)
+                            .ok_or(ProtocolError::InvalidState)?;
+                        if end > metadata.size_bytes
+                            || page.next_offset != (end < metadata.size_bytes).then_some(end)
+                            || (decoded.is_empty() && metadata.size_bytes != 0)
+                        {
+                            return Err(ProtocolError::InvalidState);
+                        }
+                        digest.update(&decoded);
+                        bytes.extend_from_slice(&decoded);
+                        let Some(next) = page.next_offset else { break };
+                        offset = next;
+                    }
+                    let digest = digest.finalize();
+                    let mut sha256 = String::with_capacity(digest.len() * 2);
+                    for byte in digest.as_slice() {
+                        let _ = write!(sha256, "{byte:02x}");
+                    }
+                    if sha256 != metadata.sha256 {
+                        return Err(ProtocolError::InvalidState);
+                    }
+                    Ok(ArtifactRead::Complete(ArtifactDownload {
+                        metadata,
+                        bytes,
+                        digest: digest.into(),
+                    }))
+                })
+            })
+            .await
+            .map_err(Error::from)?;
+        self.store.verify_generation(runtime).await?;
+        Ok(artifact)
     }
 
     /// Reads exactly one source page; hosts preserve the cursor and supply their configured page size.
