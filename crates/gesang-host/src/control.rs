@@ -161,6 +161,25 @@ impl ControlPlane {
             .with_state(self)
     }
 
+    /// Serves one-time model claims on the host's dedicated private listener.
+    pub fn personal_model_claim_router(
+        self,
+        claims: crate::PersonalCredentialClaims,
+        max_body_bytes: NonZeroUsize,
+    ) -> Router {
+        Router::new()
+            .route(
+                "/internal/v1/personal-model/claim",
+                post(claim_personal_model),
+            )
+            .layer(DefaultBodyLimit::max(max_body_bytes.get()))
+            .layer(middleware::map_response_with_state(self.clone(), no_store))
+            .with_state(ModelClaimState {
+                control: self,
+                claims,
+            })
+    }
+
     async fn runtime(
         &self,
         headers: &HeaderMap,
@@ -406,6 +425,57 @@ async fn execution_key(
         revision: lease.revision,
         service_key: BASE64_URL_SAFE_NO_PAD.encode(lease.key.expose()),
     }))
+}
+
+#[derive(Clone)]
+struct ModelClaimState {
+    control: ControlPlane,
+    claims: crate::PersonalCredentialClaims,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelClaimRequest {
+    agent_id: Uuid,
+    epoch: i64,
+    owner: String,
+    operation_id: Uuid,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum ClaimedModelChange<'a> {
+    Set { provider: &'a str, key: &'a str },
+    Remove { provider: &'a str },
+}
+
+async fn claim_personal_model(
+    State(state): State<ModelClaimState>,
+    headers: HeaderMap,
+    body: std::result::Result<Json<ModelClaimRequest>, axum::extract::rejection::JsonRejection>,
+) -> std::result::Result<Response, Failure> {
+    let Json(request) =
+        body.map_err(|_| Error::InvalidCommand("invalid personal model claim".into()))?;
+    let runtime = state
+        .control
+        .runtime(&headers, request.agent_id, request.epoch, &request.owner)
+        .await?;
+    let change = state
+        .control
+        .store
+        .under_current_execution(&runtime, || {
+            state.claims.claim(&runtime, request.operation_id)
+        })
+        .await?;
+    let reply = match &change {
+        crate::PersonalCredentialChange::Set { provider, key } => {
+            ClaimedModelChange::Set { provider, key }
+        }
+        crate::PersonalCredentialChange::Remove { provider } => {
+            ClaimedModelChange::Remove { provider }
+        }
+    };
+    Ok(Json(reply).into_response())
 }
 
 async fn no_store(State(state): State<ControlPlane>, mut response: Response) -> Response {

@@ -16,7 +16,8 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chopin_protocol::{
     ChordClient, ConversationState, ConversationSummary, CorrectionKind, EngineCommand,
     GoalCommand, GoalPage, GoalSnapshot, HeldChange, LoopChange, LoopSettings, LoopStanding,
-    ModelChoices, ProtocolError, PublishedArtifact, StateObserver, TranscriptPage,
+    ModelChoices, ModelSettingsSnapshot, ProtocolError, PublishedArtifact, StateObserver,
+    TranscriptPage,
 };
 use gesang_api::{ApiProblem, CommandAuthorization};
 use gesang_core::{
@@ -28,6 +29,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use uuid::Uuid;
+
+use crate::{PersonalCredentialChange, PersonalCredentialClaims};
 
 mod observation;
 pub use observation::EngineObservation;
@@ -329,6 +332,64 @@ impl EngineAdapter {
             .map_err(Error::from)
     }
 
+    /// Reads one authoritative personal model settings snapshot from the current writer.
+    pub async fn model_settings(&self, runtime: &Runtime) -> Result<ModelSettingsSnapshot> {
+        let snapshot = self
+            .call(runtime, |client| {
+                Box::pin(async move {
+                    let value = client
+                        .invoke(
+                            "chopin.credentials",
+                            serde_json::json!({}),
+                            "snapshot",
+                            None,
+                        )
+                        .await?;
+                    serde_json::from_value(value).map_err(ProtocolError::from)
+                })
+            })
+            .await
+            .map_err(model_settings_error)?;
+        self.store.verify_generation(runtime).await?;
+        Ok(snapshot)
+    }
+
+    /// Stages a single private claim and waits for the current writer's durable confirmation.
+    ///
+    /// Dropping or timing out the call discards an unclaimed change. A claimed change's result
+    /// remains uncertain until an explicit confirmation arrives.
+    pub async fn apply_personal_credential_change(
+        &self,
+        runtime: &Runtime,
+        claims: &PersonalCredentialClaims,
+        change: PersonalCredentialChange,
+    ) -> Result<()> {
+        let claim = claims.stage(runtime.clone(), self.policy.operation_timeout, change)?;
+        let operation_id = claim.id;
+        let result = self
+            .call(runtime, move |client| {
+                Box::pin(async move {
+                    let confirmation = client
+                        .invoke(
+                            "chopin.credentials",
+                            serde_json::json!({}),
+                            "applyPersonalCredentialChange",
+                            Some(serde_json::json!({"operationId": operation_id})),
+                        )
+                        .await?;
+                    if confirmation.is_null() {
+                        Ok(())
+                    } else {
+                        Err(ProtocolError::InvalidFrame)
+                    }
+                })
+            })
+            .await
+            .map_err(model_settings_error);
+        drop(claim);
+        result
+    }
+
     /// Reads an authoritative history page without collecting or truncating the remaining history.
     pub async fn entries(
         &self,
@@ -599,6 +660,21 @@ impl From<CallError> for Error {
             }
         }
     }
+}
+
+fn model_settings_error(error: CallError) -> Error {
+    if let CallError::Protocol(ProtocolError::Method { error: problem, .. }) = &error
+        && problem["kind"] == "plugin"
+    {
+        match problem["code"].as_str() {
+            Some("forbidden") => return Error::Forbidden,
+            Some("credential_refused") => {
+                return Error::InvalidCommand("model credential operation was refused".into());
+            }
+            _ => {}
+        }
+    }
+    error.into()
 }
 
 fn pool_unavailable() -> Error {

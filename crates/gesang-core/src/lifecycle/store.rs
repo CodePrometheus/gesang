@@ -391,10 +391,22 @@ impl Store {
 
     /// Requires current execution readiness without accepting a migration-purpose credential.
     pub async fn verify_execution(&self, runtime: &Runtime) -> Result<()> {
+        self.under_current_execution(runtime, || Ok(())).await
+    }
+
+    /// Consumes a synchronous host capability while the exact ready writer remains current.
+    ///
+    /// The callback must not perform I/O. A failed transaction discards its returned value.
+    pub async fn under_current_execution<T: Send>(
+        &self,
+        runtime: &Runtime,
+        consume: impl FnOnce() -> Result<T> + Send,
+    ) -> Result<T> {
         let mut tx = self.database.begin_read().await?;
         crate::anchor::verify_execution(&mut tx.coordination(), runtime).await?;
+        let value = consume()?;
         tx.commit().await?;
-        Ok(())
+        Ok(value)
     }
 
     /// Returns the current writer's fixed purpose and preparation stage.
