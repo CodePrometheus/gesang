@@ -161,7 +161,7 @@ impl ControlPlane {
             .with_state(self)
     }
 
-    /// Serves one-time model claims on the host's dedicated private listener.
+    /// Serves personal model claims and subscription challenges on the host's private listener.
     pub fn personal_model_claim_router(
         self,
         claims: crate::PersonalCredentialClaims,
@@ -171,6 +171,10 @@ impl ControlPlane {
             .route(
                 "/internal/v1/personal-model/claim",
                 post(claim_personal_model),
+            )
+            .route(
+                "/internal/v1/personal-model/subscription-challenge",
+                post(deliver_subscription_challenge),
             )
             .layer(DefaultBodyLimit::max(max_body_bytes.get()))
             .layer(middleware::map_response_with_state(self.clone(), no_store))
@@ -476,6 +480,50 @@ async fn claim_personal_model(
         }
     };
     Ok(Json(reply).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubscriptionChallengeRequest {
+    agent_id: Uuid,
+    epoch: i64,
+    owner: String,
+    attempt_id: Uuid,
+    operation_id: Uuid,
+    verification_url: String,
+    display_code: Option<String>,
+}
+
+async fn deliver_subscription_challenge(
+    State(state): State<ModelClaimState>,
+    headers: HeaderMap,
+    body: std::result::Result<
+        Json<SubscriptionChallengeRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> std::result::Result<StatusCode, Failure> {
+    let Json(request) =
+        body.map_err(|_| Error::InvalidCommand("invalid subscription challenge".into()))?;
+    let runtime = state
+        .control
+        .runtime(&headers, request.agent_id, request.epoch, &request.owner)
+        .await?;
+    state
+        .control
+        .store
+        .under_current_execution(&runtime, || {
+            state.claims.challenges.deliver(
+                &runtime,
+                request.operation_id,
+                request.attempt_id,
+                crate::SubscriptionChallenge {
+                    verification_url: request.verification_url,
+                    display_code: request.display_code,
+                },
+            )
+        })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn no_store(State(state): State<ControlPlane>, mut response: Response) -> Response {

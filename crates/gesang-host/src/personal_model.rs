@@ -37,7 +37,10 @@ impl fmt::Debug for PersonalCredentialChange {
 
 /// In-memory handoff shared by the browser mutation adapter and the private claim router.
 #[derive(Clone, Default)]
-pub struct PersonalCredentialClaims(Arc<Mutex<HashMap<Uuid, Pending>>>);
+pub struct PersonalCredentialClaims {
+    pending: Arc<Mutex<HashMap<Uuid, Pending>>>,
+    pub(crate) challenges: crate::subscription::SubscriptionChallenges,
+}
 
 impl fmt::Debug for PersonalCredentialClaims {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,7 +63,7 @@ pub(crate) struct ClaimGuard {
 impl Drop for ClaimGuard {
     fn drop(&mut self) {
         self.claims
-            .0
+            .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.id);
@@ -78,7 +81,7 @@ impl PersonalCredentialClaims {
         let deadline = Instant::now()
             .checked_add(lifetime)
             .ok_or_else(unavailable)?;
-        let mut pending = self.0.lock().map_err(|_| unavailable())?;
+        let mut pending = self.pending.lock().map_err(|_| unavailable())?;
         let Entry::Vacant(entry) = pending.entry(id) else {
             return Err(unavailable());
         };
@@ -94,7 +97,7 @@ impl PersonalCredentialClaims {
     }
 
     pub(crate) fn claim(&self, runtime: &Runtime, id: Uuid) -> Result<PersonalCredentialChange> {
-        let mut pending = self.0.lock().map_err(|_| unavailable())?;
+        let mut pending = self.pending.lock().map_err(|_| unavailable())?;
         let entry = pending.get(&id).ok_or(Error::NotFound)?;
         if entry.runtime != *runtime {
             return Err(Error::Forbidden);
@@ -183,6 +186,6 @@ mod tests {
             claims.claim(&writer, expired.id),
             Err(Error::NotFound)
         ));
-        assert!(claims.0.lock().unwrap().is_empty());
+        assert!(claims.pending.lock().unwrap().is_empty());
     }
 }

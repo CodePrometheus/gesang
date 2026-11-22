@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use uuid::Uuid;
 
-use crate::{PersonalCredentialChange, PersonalCredentialClaims};
+use crate::{PersonalCredentialChange, PersonalCredentialClaims, SubscriptionChallenge};
 
 mod observation;
 pub use observation::EngineObservation;
@@ -55,6 +55,30 @@ pub enum ArtifactRead {
     TooLarge,
     /// The complete file has been validated.
     Complete(ArtifactDownload),
+}
+
+/// Credential-free commands for the owner's original subscription service.
+#[derive(Debug)]
+pub enum SubscriptionChange {
+    /// Starts a connection or prepares a separate switch candidate.
+    Start {
+        /// Provider selected by the owner.
+        provider: String,
+        /// Whether to keep the active account until the replacement is confirmed.
+        switch_account: bool,
+    },
+    /// Cancels just the selected sign-in attempt.
+    Cancel {
+        /// The original attempt identity.
+        attempt: Uuid,
+    },
+    /// Disconnects the selected provider's expected account.
+    Disconnect {
+        /// Provider selected by the owner.
+        provider: String,
+        /// Stable identity of the account to disconnect.
+        expected_account_id: Uuid,
+    },
 }
 
 /// Explicit host configuration for sequential execution RPC connections.
@@ -390,6 +414,112 @@ impl EngineAdapter {
         result
     }
 
+    /// Reads the execution owner's public subscription status, if the producer supports it.
+    pub async fn subscription_snapshot(&self, runtime: &Runtime) -> Result<Option<Value>> {
+        match self
+            .subscription_rpc(runtime, "subscriptionSnapshot", None)
+            .await
+        {
+            Ok(value) => {
+                self.store.verify_generation(runtime).await?;
+                Ok(Some(value))
+            }
+            Err(CallError::Protocol(ProtocolError::UnknownMember)) => Ok(None),
+            Err(error) if plugin_code(&error) == Some("credential_refused") => Ok(None),
+            Err(error) => Err(subscription_error(error)),
+        }
+    }
+
+    /// Starts, cancels, or disconnects an owner subscription without sending credentials.
+    pub async fn subscription_change(
+        &self,
+        runtime: &Runtime,
+        method: SubscriptionChange,
+    ) -> Result<()> {
+        let starts_attempt = matches!(&method, SubscriptionChange::Start { .. });
+        let (member, args) = match method {
+            SubscriptionChange::Start {
+                provider,
+                switch_account,
+            } => (
+                "startSubscriptionSignIn",
+                serde_json::json!({"provider": provider, "mode": if switch_account { "switch_account" } else { "connect" }}),
+            ),
+            SubscriptionChange::Cancel { attempt } => (
+                "cancelSubscriptionSignIn",
+                serde_json::json!({"attemptId": attempt}),
+            ),
+            SubscriptionChange::Disconnect {
+                provider,
+                expected_account_id,
+            } => (
+                "disconnectSubscription",
+                serde_json::json!({"provider": provider, "expectedAccountId": expected_account_id}),
+            ),
+        };
+        let response = self
+            .subscription_rpc(runtime, member, Some(args))
+            .await
+            .map_err(subscription_error)?;
+        let acknowledged = if starts_attempt {
+            response["attemptId"]
+                .as_str()
+                .is_some_and(|id| Uuid::parse_str(id).is_ok())
+        } else {
+            response.is_null()
+        };
+        if !acknowledged {
+            return Err(Error::Uncertain(
+                "the subscription operation was not acknowledged".into(),
+            ));
+        }
+        self.store.verify_generation(runtime).await
+    }
+
+    /// Accepts a challenge only from the exact authenticated writer over the private callback.
+    pub async fn subscription_challenge(
+        &self,
+        runtime: &Runtime,
+        claims: &PersonalCredentialClaims,
+        attempt: Uuid,
+    ) -> Result<SubscriptionChallenge> {
+        let guard =
+            claims
+                .challenges
+                .reserve(runtime.clone(), attempt, self.policy.operation_timeout)?;
+        let response = self
+            .subscription_rpc(
+                runtime,
+                "deliverSubscriptionChallenge",
+                Some(serde_json::json!({"attemptId": attempt, "operationId": guard.id})),
+            )
+            .await
+            .map_err(subscription_error)?;
+        if !response.is_null() {
+            return Err(Error::Uncertain(
+                "the subscription challenge delivery was not acknowledged".into(),
+            ));
+        }
+        self.store.verify_generation(runtime).await?;
+        guard.take()
+    }
+
+    async fn subscription_rpc(
+        &self,
+        runtime: &Runtime,
+        member: &'static str,
+        args: Option<Value>,
+    ) -> std::result::Result<Value, CallError> {
+        self.call(runtime, move |client| {
+            Box::pin(async move {
+                client
+                    .invoke("chopin.subscriptions", serde_json::json!({}), member, args)
+                    .await
+            })
+        })
+        .await
+    }
+
     /// Reads an authoritative history page without collecting or truncating the remaining history.
     pub async fn entries(
         &self,
@@ -663,18 +793,31 @@ impl From<CallError> for Error {
 }
 
 fn model_settings_error(error: CallError) -> Error {
-    if let CallError::Protocol(ProtocolError::Method { error: problem, .. }) = &error
-        && problem["kind"] == "plugin"
-    {
-        match problem["code"].as_str() {
-            Some("forbidden") => return Error::Forbidden,
-            Some("credential_refused") => {
-                return Error::InvalidCommand("model credential operation was refused".into());
-            }
-            _ => {}
+    match plugin_code(&error) {
+        Some("forbidden") => Error::Forbidden,
+        Some("credential_refused") => {
+            Error::InvalidCommand("model credential operation was refused".into())
         }
+        _ => error.into(),
     }
-    error.into()
+}
+
+fn subscription_error(error: CallError) -> Error {
+    match plugin_code(&error) {
+        Some("subscription_account_mismatch") => Error::RequestConflict,
+        _ => model_settings_error(error),
+    }
+}
+
+fn plugin_code(error: &CallError) -> Option<&str> {
+    match error {
+        CallError::Protocol(ProtocolError::Method { error: problem, .. })
+            if problem["kind"] == "plugin" =>
+        {
+            problem["code"].as_str()
+        }
+        _ => None,
+    }
 }
 
 fn pool_unavailable() -> Error {
