@@ -382,7 +382,7 @@ dependencies = [
 [[package]]
 name = "chopin-job-broker"
 version = "0.7.0-rc2"
-source = "git+https://github.com/CodePrometheus/chopin-ai.git?rev=2c6e7c4717cddda1e79447566c83826b11a070d9#2c6e7c4717cddda1e79447566c83826b11a070d9"
+source = "git+https://github.com/CodePrometheus/chopin-ai.git?rev=ea9171ba72e4e1bd93e9ea1203761a984b0876ac#ea9171ba72e4e1bd93e9ea1203761a984b0876ac"
 dependencies = [
  "async-trait",
  "axum",
@@ -404,7 +404,7 @@ dependencies = [
 [[package]]
 name = "chopin-protocol"
 version = "0.7.0-rc2"
-source = "git+https://github.com/CodePrometheus/chopin-ai.git?rev=2c6e7c4717cddda1e79447566c83826b11a070d9#2c6e7c4717cddda1e79447566c83826b11a070d9"
+source = "git+https://github.com/CodePrometheus/chopin-ai.git?rev=ea9171ba72e4e1bd93e9ea1203761a984b0876ac#ea9171ba72e4e1bd93e9ea1203761a984b0876ac"
 dependencies = [
  "flate2",
  "futures-util",

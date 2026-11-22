@@ -13,8 +13,8 @@ repository = "https://github.com/CodePrometheus/gesang"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "original-uri"] }
 base64 = "0.23.1"
-chopin-protocol = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "2c6e7c4717cddda1e79447566c83826b11a070d9", version = "=0.7.0-rc2" }
-chopin-job-broker = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "2c6e7c4717cddda1e79447566c83826b11a070d9", version = "=0.7.0-rc2", features = ["transport"] }
+chopin-protocol = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "ea9171ba72e4e1bd93e9ea1203761a984b0876ac", version = "=0.7.0-rc2" }
+chopin-job-broker = { git = "https://github.com/CodePrometheus/chopin-ai.git", rev = "ea9171ba72e4e1bd93e9ea1203761a984b0876ac", version = "=0.7.0-rc2", features = ["transport"] }
 chacha20poly1305 = "0.11.0"
 getrandom = "0.4.3"
 hmac = "0.13.0"
