@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     future::Future,
+    num::NonZeroUsize,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -10,10 +12,12 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chopin_protocol::{
     ChordClient, ConversationState, ConversationSummary, CorrectionKind, EngineCommand,
     GoalCommand, GoalPage, GoalSnapshot, HeldChange, LoopChange, LoopSettings, LoopStanding,
-    ModelChoices, ProtocolError, StateObserver, TranscriptPage,
+    ModelChoices, ModelSettingsSnapshot, ProtocolError, PublishedArtifact, StateObserver,
+    TranscriptPage,
 };
 use gesang_api::{ApiProblem, CommandAuthorization};
 use gesang_core::{
@@ -22,11 +26,60 @@ use gesang_core::{
 };
 use jiff::Timestamp;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use uuid::Uuid;
 
+use crate::{PersonalCredentialChange, PersonalCredentialClaims, SubscriptionChallenge};
+
 mod observation;
 pub use observation::EngineObservation;
+
+/// The checked bytes from one original publication.
+#[derive(Debug)]
+pub struct ArtifactDownload {
+    /// Source metadata for the exact publication.
+    pub metadata: PublishedArtifact,
+    /// Complete, validated file bytes.
+    pub bytes: Vec<u8>,
+    /// Verified binary SHA-256.
+    pub digest: [u8; 32],
+}
+
+/// Outcome of checking an original publication against the host's download policy.
+#[derive(Debug)]
+pub enum ArtifactRead {
+    /// The publication does not belong to this goal or has not finished.
+    Missing,
+    /// The announced file exceeded the host's limit before any page was read.
+    TooLarge,
+    /// The complete file has been validated.
+    Complete(ArtifactDownload),
+}
+
+/// Credential-free commands for the owner's original subscription service.
+#[derive(Debug)]
+pub enum SubscriptionChange {
+    /// Starts a connection or prepares a separate switch candidate.
+    Start {
+        /// Provider selected by the owner.
+        provider: String,
+        /// Whether to keep the active account until the replacement is confirmed.
+        switch_account: bool,
+    },
+    /// Cancels just the selected sign-in attempt.
+    Cancel {
+        /// The original attempt identity.
+        attempt: Uuid,
+    },
+    /// Disconnects the selected provider's expected account.
+    Disconnect {
+        /// Provider selected by the owner.
+        provider: String,
+        /// Stable identity of the account to disconnect.
+        expected_account_id: Uuid,
+    },
+}
 
 /// Explicit host configuration for sequential execution RPC connections.
 #[derive(Clone, Debug)]
@@ -146,6 +199,101 @@ impl EngineAdapter {
         .map_err(Error::from)
     }
 
+    /// Lists immutable publications using the current fenced owner connection.
+    pub async fn goal_artifacts(
+        &self,
+        runtime: &Runtime,
+        goal_id: &str,
+    ) -> Result<Vec<PublishedArtifact>> {
+        let goal_id = goal_id.to_owned();
+        self.call(runtime, |client| {
+            Box::pin(async move { client.goal_artifacts(&goal_id).await })
+        })
+        .await
+        .map_err(Error::from)
+    }
+
+    /// Reads and verifies every page of the exact original publication before returning bytes.
+    pub async fn goal_artifact(
+        &self,
+        runtime: &Runtime,
+        goal_id: &str,
+        artifact_id: Uuid,
+        max_file_bytes: NonZeroUsize,
+    ) -> Result<ArtifactRead> {
+        let goal_id = goal_id.to_owned();
+        let artifact = self
+            .call(runtime, |client| {
+                Box::pin(async move {
+                    let Some(metadata) = client
+                        .goal_artifacts(&goal_id)
+                        .await?
+                        .into_iter()
+                        .find(|entry| entry.artifact_id == artifact_id)
+                    else {
+                        return Ok(ArtifactRead::Missing);
+                    };
+                    let Ok(size) = usize::try_from(metadata.size_bytes) else {
+                        return Ok(ArtifactRead::TooLarge);
+                    };
+                    if size > max_file_bytes.get() {
+                        return Ok(ArtifactRead::TooLarge);
+                    }
+                    let mut bytes = Vec::new();
+                    bytes
+                        .try_reserve_exact(size)
+                        .map_err(|_| ProtocolError::MessageTooLarge)?;
+                    let mut offset = 0;
+                    let mut digest = Sha256::new();
+                    loop {
+                        let page = client
+                            .goal_artifact_page(&goal_id, artifact_id, offset)
+                            .await?
+                            .ok_or(ProtocolError::InvalidState)?;
+                        let remaining = size - bytes.len();
+                        if page.data.len()
+                            > base64::encoded_len(remaining, false).unwrap_or(usize::MAX)
+                        {
+                            return Err(ProtocolError::InvalidState);
+                        }
+                        let decoded = URL_SAFE_NO_PAD
+                            .decode(&page.data)
+                            .map_err(|_| ProtocolError::InvalidState)?;
+                        let end = offset
+                            .checked_add(decoded.len() as u64)
+                            .ok_or(ProtocolError::InvalidState)?;
+                        if end > metadata.size_bytes
+                            || page.next_offset != (end < metadata.size_bytes).then_some(end)
+                            || (decoded.is_empty() && metadata.size_bytes != 0)
+                        {
+                            return Err(ProtocolError::InvalidState);
+                        }
+                        digest.update(&decoded);
+                        bytes.extend_from_slice(&decoded);
+                        let Some(next) = page.next_offset else { break };
+                        offset = next;
+                    }
+                    let digest = digest.finalize();
+                    let mut sha256 = String::with_capacity(digest.len() * 2);
+                    for byte in digest.as_slice() {
+                        let _ = write!(sha256, "{byte:02x}");
+                    }
+                    if sha256 != metadata.sha256 {
+                        return Err(ProtocolError::InvalidState);
+                    }
+                    Ok(ArtifactRead::Complete(ArtifactDownload {
+                        metadata,
+                        bytes,
+                        digest: digest.into(),
+                    }))
+                })
+            })
+            .await
+            .map_err(Error::from)?;
+        self.store.verify_generation(runtime).await?;
+        Ok(artifact)
+    }
+
     /// Reads exactly one source page; hosts preserve the cursor and supply their configured page size.
     pub async fn goals(
         &self,
@@ -206,6 +354,170 @@ impl EngineAdapter {
         self.call(runtime, |client| Box::pin(client.models()))
             .await
             .map_err(Error::from)
+    }
+
+    /// Reads one authoritative personal model settings snapshot from the current writer.
+    pub async fn model_settings(&self, runtime: &Runtime) -> Result<ModelSettingsSnapshot> {
+        let snapshot = self
+            .call(runtime, |client| {
+                Box::pin(async move {
+                    let value = client
+                        .invoke(
+                            "chopin.credentials",
+                            serde_json::json!({}),
+                            "snapshot",
+                            None,
+                        )
+                        .await?;
+                    serde_json::from_value(value).map_err(ProtocolError::from)
+                })
+            })
+            .await
+            .map_err(model_settings_error)?;
+        self.store.verify_generation(runtime).await?;
+        Ok(snapshot)
+    }
+
+    /// Stages a single private claim and waits for the current writer's durable confirmation.
+    ///
+    /// Dropping or timing out the call discards an unclaimed change. A claimed change's result
+    /// remains uncertain until an explicit confirmation arrives.
+    pub async fn apply_personal_credential_change(
+        &self,
+        runtime: &Runtime,
+        claims: &PersonalCredentialClaims,
+        change: PersonalCredentialChange,
+    ) -> Result<()> {
+        let claim = claims.stage(runtime.clone(), self.policy.operation_timeout, change)?;
+        let operation_id = claim.id;
+        let result = self
+            .call(runtime, move |client| {
+                Box::pin(async move {
+                    let confirmation = client
+                        .invoke(
+                            "chopin.credentials",
+                            serde_json::json!({}),
+                            "applyPersonalCredentialChange",
+                            Some(serde_json::json!({"operationId": operation_id})),
+                        )
+                        .await?;
+                    if confirmation.is_null() {
+                        Ok(())
+                    } else {
+                        Err(ProtocolError::InvalidFrame)
+                    }
+                })
+            })
+            .await
+            .map_err(model_settings_error);
+        drop(claim);
+        result
+    }
+
+    /// Reads the execution owner's public subscription status, if the producer supports it.
+    pub async fn subscription_snapshot(&self, runtime: &Runtime) -> Result<Option<Value>> {
+        match self
+            .subscription_rpc(runtime, "subscriptionSnapshot", None)
+            .await
+        {
+            Ok(value) => {
+                self.store.verify_generation(runtime).await?;
+                Ok(Some(value))
+            }
+            Err(CallError::Protocol(ProtocolError::UnknownMember)) => Ok(None),
+            Err(error) if plugin_code(&error) == Some("credential_refused") => Ok(None),
+            Err(error) => Err(subscription_error(error)),
+        }
+    }
+
+    /// Starts, cancels, or disconnects an owner subscription without sending credentials.
+    pub async fn subscription_change(
+        &self,
+        runtime: &Runtime,
+        method: SubscriptionChange,
+    ) -> Result<()> {
+        let starts_attempt = matches!(&method, SubscriptionChange::Start { .. });
+        let (member, args) = match method {
+            SubscriptionChange::Start {
+                provider,
+                switch_account,
+            } => (
+                "startSubscriptionSignIn",
+                serde_json::json!({"provider": provider, "mode": if switch_account { "switch_account" } else { "connect" }}),
+            ),
+            SubscriptionChange::Cancel { attempt } => (
+                "cancelSubscriptionSignIn",
+                serde_json::json!({"attemptId": attempt}),
+            ),
+            SubscriptionChange::Disconnect {
+                provider,
+                expected_account_id,
+            } => (
+                "disconnectSubscription",
+                serde_json::json!({"provider": provider, "expectedAccountId": expected_account_id}),
+            ),
+        };
+        let response = self
+            .subscription_rpc(runtime, member, Some(args))
+            .await
+            .map_err(subscription_error)?;
+        let acknowledged = if starts_attempt {
+            response["attemptId"]
+                .as_str()
+                .is_some_and(|id| Uuid::parse_str(id).is_ok())
+        } else {
+            response.is_null()
+        };
+        if !acknowledged {
+            return Err(Error::Uncertain(
+                "the subscription operation was not acknowledged".into(),
+            ));
+        }
+        self.store.verify_generation(runtime).await
+    }
+
+    /// Accepts a challenge only from the exact authenticated writer over the private callback.
+    pub async fn subscription_challenge(
+        &self,
+        runtime: &Runtime,
+        claims: &PersonalCredentialClaims,
+        attempt: Uuid,
+    ) -> Result<SubscriptionChallenge> {
+        let guard =
+            claims
+                .challenges
+                .reserve(runtime.clone(), attempt, self.policy.operation_timeout)?;
+        let response = self
+            .subscription_rpc(
+                runtime,
+                "deliverSubscriptionChallenge",
+                Some(serde_json::json!({"attemptId": attempt, "operationId": guard.id})),
+            )
+            .await
+            .map_err(subscription_error)?;
+        if !response.is_null() {
+            return Err(Error::Uncertain(
+                "the subscription challenge delivery was not acknowledged".into(),
+            ));
+        }
+        self.store.verify_generation(runtime).await?;
+        guard.take()
+    }
+
+    async fn subscription_rpc(
+        &self,
+        runtime: &Runtime,
+        member: &'static str,
+        args: Option<Value>,
+    ) -> std::result::Result<Value, CallError> {
+        self.call(runtime, move |client| {
+            Box::pin(async move {
+                client
+                    .invoke("chopin.subscriptions", serde_json::json!({}), member, args)
+                    .await
+            })
+        })
+        .await
     }
 
     /// Reads an authoritative history page without collecting or truncating the remaining history.
@@ -477,6 +789,34 @@ impl From<CallError> for Error {
                 Self::Uncertain("engine response could not be established".into())
             }
         }
+    }
+}
+
+fn model_settings_error(error: CallError) -> Error {
+    match plugin_code(&error) {
+        Some("forbidden") => Error::Forbidden,
+        Some("credential_refused") => {
+            Error::InvalidCommand("model credential operation was refused".into())
+        }
+        _ => error.into(),
+    }
+}
+
+fn subscription_error(error: CallError) -> Error {
+    match plugin_code(&error) {
+        Some("subscription_account_mismatch") => Error::RequestConflict,
+        _ => model_settings_error(error),
+    }
+}
+
+fn plugin_code(error: &CallError) -> Option<&str> {
+    match error {
+        CallError::Protocol(ProtocolError::Method { error: problem, .. })
+            if problem["kind"] == "plugin" =>
+        {
+            problem["code"].as_str()
+        }
+        _ => None,
     }
 }
 
