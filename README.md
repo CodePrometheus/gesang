@@ -18,6 +18,10 @@ kernel, platform contracts, and host adapters. Pin the release tag in a host's
 Cargo manifest and follow the [embedding guide](docs/embedding.md). Standalone
 server and Android distributions remain in development.
 
+The [standalone demo](apps/demo/README.md) runs a browser chat with a configured
+model and a Linux Docker workspace. It includes the chat, tool output, and file
+download path for one operator.
+
 The [architecture guide](docs/architecture.md) describes ownership boundaries.
 The [verification guide](docs/verification.md) lists the deployment checks.
 

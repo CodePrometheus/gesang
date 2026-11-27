@@ -548,11 +548,26 @@ impl Store {
         submission: &CommandSubmission,
         requirements: &CommandRequirements,
     ) -> Result<CommandReceipt> {
+        self.enqueue_checked(owner, agent_id, submission, requirements, None)
+            .await
+    }
+
+    pub(crate) async fn enqueue_checked(
+        &self,
+        owner: &Owner,
+        agent_id: Uuid,
+        submission: &CommandSubmission,
+        requirements: &CommandRequirements,
+        authorization: Option<&dyn crate::CommandAdmissionCheck>,
+    ) -> Result<CommandReceipt> {
         let content = serde_json::to_vec(submission)?;
         let digest = Sha256::digest(&content).to_vec();
         let aad = command_aad(agent_id, submission.request_id);
         let sealed = self.key.seal(&aad, &content)?;
         let mut tx = self.database.begin().await?;
+        if let Some(check) = authorization {
+            check.authorize(&mut tx.coordination()).await?;
+        }
         query_scalar::<Uuid>(
             tx.executor(),
             statement!(

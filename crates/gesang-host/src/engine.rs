@@ -191,12 +191,10 @@ impl EngineAdapter {
 
     /// Reads one authoritative goal through the same fenced connection used for delivery.
     pub async fn goal(&self, runtime: &Runtime, goal_id: &str) -> Result<GoalSnapshot> {
-        let goal_id = goal_id.to_owned();
-        self.call(runtime, |client| {
-            Box::pin(async move { client.snapshot(&goal_id).await })
+        self.goal_call(runtime, goal_id, |client, id| {
+            Box::pin(async move { client.snapshot(&id).await })
         })
         .await
-        .map_err(Error::from)
     }
 
     /// Lists immutable publications using the current fenced owner connection.
@@ -205,12 +203,10 @@ impl EngineAdapter {
         runtime: &Runtime,
         goal_id: &str,
     ) -> Result<Vec<PublishedArtifact>> {
-        let goal_id = goal_id.to_owned();
-        self.call(runtime, |client| {
-            Box::pin(async move { client.goal_artifacts(&goal_id).await })
+        self.goal_call(runtime, goal_id, |client, id| {
+            Box::pin(async move { client.goal_artifacts(&id).await })
         })
         .await
-        .map_err(Error::from)
     }
 
     /// Reads and verifies every page of the exact original publication before returning bytes.
@@ -221,77 +217,71 @@ impl EngineAdapter {
         artifact_id: Uuid,
         max_file_bytes: NonZeroUsize,
     ) -> Result<ArtifactRead> {
-        let goal_id = goal_id.to_owned();
-        let artifact = self
-            .call(runtime, |client| {
-                Box::pin(async move {
-                    let Some(metadata) = client
-                        .goal_artifacts(&goal_id)
+        self.goal_call(runtime, goal_id, |client, goal_id| {
+            Box::pin(async move {
+                let Some(metadata) = client
+                    .goal_artifacts(&goal_id)
+                    .await?
+                    .into_iter()
+                    .find(|entry| entry.artifact_id == artifact_id)
+                else {
+                    return Ok(ArtifactRead::Missing);
+                };
+                let Ok(size) = usize::try_from(metadata.size_bytes) else {
+                    return Ok(ArtifactRead::TooLarge);
+                };
+                if size > max_file_bytes.get() {
+                    return Ok(ArtifactRead::TooLarge);
+                }
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(size)
+                    .map_err(|_| ProtocolError::MessageTooLarge)?;
+                let mut offset = 0;
+                let mut digest = Sha256::new();
+                loop {
+                    let page = client
+                        .goal_artifact_page(&goal_id, artifact_id, offset)
                         .await?
-                        .into_iter()
-                        .find(|entry| entry.artifact_id == artifact_id)
-                    else {
-                        return Ok(ArtifactRead::Missing);
-                    };
-                    let Ok(size) = usize::try_from(metadata.size_bytes) else {
-                        return Ok(ArtifactRead::TooLarge);
-                    };
-                    if size > max_file_bytes.get() {
-                        return Ok(ArtifactRead::TooLarge);
-                    }
-                    let mut bytes = Vec::new();
-                    bytes
-                        .try_reserve_exact(size)
-                        .map_err(|_| ProtocolError::MessageTooLarge)?;
-                    let mut offset = 0;
-                    let mut digest = Sha256::new();
-                    loop {
-                        let page = client
-                            .goal_artifact_page(&goal_id, artifact_id, offset)
-                            .await?
-                            .ok_or(ProtocolError::InvalidState)?;
-                        let remaining = size - bytes.len();
-                        if page.data.len()
-                            > base64::encoded_len(remaining, false).unwrap_or(usize::MAX)
-                        {
-                            return Err(ProtocolError::InvalidState);
-                        }
-                        let decoded = URL_SAFE_NO_PAD
-                            .decode(&page.data)
-                            .map_err(|_| ProtocolError::InvalidState)?;
-                        let end = offset
-                            .checked_add(decoded.len() as u64)
-                            .ok_or(ProtocolError::InvalidState)?;
-                        if end > metadata.size_bytes
-                            || page.next_offset != (end < metadata.size_bytes).then_some(end)
-                            || (decoded.is_empty() && metadata.size_bytes != 0)
-                        {
-                            return Err(ProtocolError::InvalidState);
-                        }
-                        digest.update(&decoded);
-                        bytes.extend_from_slice(&decoded);
-                        let Some(next) = page.next_offset else { break };
-                        offset = next;
-                    }
-                    let digest = digest.finalize();
-                    let mut sha256 = String::with_capacity(digest.len() * 2);
-                    for byte in digest.as_slice() {
-                        let _ = write!(sha256, "{byte:02x}");
-                    }
-                    if sha256 != metadata.sha256 {
+                        .ok_or(ProtocolError::InvalidState)?;
+                    let remaining = size - bytes.len();
+                    if page.data.len() > base64::encoded_len(remaining, false).unwrap_or(usize::MAX)
+                    {
                         return Err(ProtocolError::InvalidState);
                     }
-                    Ok(ArtifactRead::Complete(ArtifactDownload {
-                        metadata,
-                        bytes,
-                        digest: digest.into(),
-                    }))
-                })
+                    let decoded = URL_SAFE_NO_PAD
+                        .decode(&page.data)
+                        .map_err(|_| ProtocolError::InvalidState)?;
+                    let end = offset
+                        .checked_add(decoded.len() as u64)
+                        .ok_or(ProtocolError::InvalidState)?;
+                    if end > metadata.size_bytes
+                        || page.next_offset != (end < metadata.size_bytes).then_some(end)
+                        || (decoded.is_empty() && metadata.size_bytes != 0)
+                    {
+                        return Err(ProtocolError::InvalidState);
+                    }
+                    digest.update(&decoded);
+                    bytes.extend_from_slice(&decoded);
+                    let Some(next) = page.next_offset else { break };
+                    offset = next;
+                }
+                let digest = digest.finalize();
+                let mut sha256 = String::with_capacity(digest.len() * 2);
+                for byte in digest.as_slice() {
+                    let _ = write!(sha256, "{byte:02x}");
+                }
+                if sha256 != metadata.sha256 {
+                    return Err(ProtocolError::InvalidState);
+                }
+                Ok(ArtifactRead::Complete(ArtifactDownload {
+                    metadata,
+                    bytes,
+                    digest: digest.into(),
+                }))
             })
-            .await
-            .map_err(Error::from)?;
-        self.store.verify_generation(runtime).await?;
-        Ok(artifact)
+        })
+        .await
     }
 
     /// Reads exactly one source page; hosts preserve the cursor and supply their configured page size.
@@ -301,11 +291,22 @@ impl EngineAdapter {
         limit: std::num::NonZeroU64,
         cursor: Option<Value>,
     ) -> Result<GoalPage> {
-        self.call(runtime, |client| {
-            Box::pin(async move { client.goals(limit.get(), cursor).await })
-        })
-        .await
-        .map_err(Error::from)
+        let page = self
+            .call(runtime, |client| {
+                Box::pin(async move { client.goals(limit.get(), cursor).await })
+            })
+            .await
+            .map_err(|error| {
+                if matches!(error, CallError::Protocol(ProtocolError::InvalidArguments))
+                    || plugin_code(&error) == Some("invalid_cursor")
+                {
+                    Error::InvalidCommand("invalid goal page request".into())
+                } else {
+                    error.into()
+                }
+            })?;
+        self.store.verify_generation(runtime).await?;
+        Ok(page)
     }
 
     /// Reads the producer's bounded current conversation window and releases its observation.
@@ -314,19 +315,26 @@ impl EngineAdapter {
         runtime: &Runtime,
         conversation_id: u64,
     ) -> Result<ConversationState> {
-        self.call(runtime, |client| {
-            Box::pin(async move {
-                let state = client
-                    .state_snapshot(
-                        "chopin.conversation",
-                        serde_json::json!({"conversation":conversation_id}),
-                    )
-                    .await?;
-                Ok(serde_json::from_value(state)?)
+        let state = self
+            .call(runtime, |client| {
+                Box::pin(async move {
+                    let value = client
+                        .state_snapshot(
+                            "chopin.conversation",
+                            serde_json::json!({"conversation":conversation_id}),
+                        )
+                        .await?;
+                    let state: ConversationState = serde_json::from_value(value)?;
+                    if state.view.conversation.id != conversation_id {
+                        return Err(ProtocolError::InvalidState);
+                    }
+                    Ok(state)
+                })
             })
-        })
-        .await
-        .map_err(Error::from)
+            .await
+            .map_err(Error::from)?;
+        self.store.verify_generation(runtime).await?;
+        Ok(state)
     }
 
     /// Preserves existing conversations and their actual sidebar metadata.
@@ -725,6 +733,43 @@ impl EngineAdapter {
             .map_err(|_| Error::Uncertain("engine observation open deadline exceeded".into()))?
     }
 
+    async fn goal_call<T: Send>(
+        &self,
+        runtime: &Runtime,
+        goal_id: &str,
+        operation: impl for<'a> FnOnce(&'a mut ChordClient, String) -> RpcFuture<'a, T> + Send,
+    ) -> Result<T> {
+        let read = async {
+            let result = self
+                .call(runtime, |client| operation(client, goal_id.to_owned()))
+                .await;
+            if let Err(CallError::Protocol(ProtocolError::Method { member, error })) = &result
+                && member == "hold"
+                && error["code"] == "unavailable"
+            {
+                // The producer uses the original submission's request ID as the goal ID.
+                // An activation error alone cannot distinguish an absent goal from a failure.
+                let id = goal_id.to_owned();
+                let receipt = self
+                    .call(runtime, |client| {
+                        Box::pin(async move { client.request(&id).await })
+                    })
+                    .await
+                    .map_err(Error::from)?;
+                self.store.verify_generation(runtime).await?;
+                if receipt.is_none_or(|receipt| receipt.goal_id != goal_id) {
+                    return Err(Error::NotFound);
+                }
+            }
+            let value = result.map_err(goal_error)?;
+            self.store.verify_generation(runtime).await?;
+            Ok(value)
+        };
+        tokio::time::timeout(self.policy.operation_timeout, read)
+            .await
+            .map_err(|_| Error::Uncertain("goal read deadline exceeded".into()))?
+    }
+
     async fn call<T: Send>(
         &self,
         runtime: &Runtime,
@@ -802,6 +847,14 @@ fn model_settings_error(error: CallError) -> Error {
     }
 }
 
+fn goal_error(error: CallError) -> Error {
+    match plugin_code(&error) {
+        Some("unknown_goal") => Error::NotFound,
+        Some("forbidden") => Error::Forbidden,
+        _ => error.into(),
+    }
+}
+
 fn subscription_error(error: CallError) -> Error {
     match plugin_code(&error) {
         Some("subscription_account_mismatch") => Error::RequestConflict,
@@ -825,7 +878,8 @@ fn pool_unavailable() -> Error {
 }
 
 fn command(value: &Value) -> Result<GoalCommand> {
-    let command: GoalCommand = serde_json::from_value(value.clone())?;
+    let command: GoalCommand = serde_json::from_value(value.clone())
+        .map_err(|_| Error::InvalidCommand("execution command could not be decoded".into()))?;
     command
         .validate()
         .map_err(|_| Error::InvalidCommand("execution command violates its contract".into()))?;

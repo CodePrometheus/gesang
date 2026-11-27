@@ -1,10 +1,6 @@
 //! Real execution interoperability probe launched by the upstream service fixture.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[path = "../../gesang-core/test-support.rs"]
-mod support;
-use support::ReadyFixture;
-
 use std::{
     env,
     error::Error,
@@ -18,10 +14,15 @@ use std::{
 
 use async_trait::async_trait;
 use chopin_protocol::{ChordClient, GoalCommand, GoalGrant};
-use gesang_api::{CommandAuthorization, GrantSelection, PermissionMode};
+use gesang_api::{
+    CommandAuthorization, CommandReceipt, CommandSubmission, DeliveryState, GrantSelection,
+    PermissionMode,
+};
 use gesang_core::{
-    Admission, Dispatch, EngineBridge, ExecutionResponse, PayloadKey, PreviousWriter, Runtime,
-    Store, VerifiedIdentity,
+    Activity, Admission, Dispatch, EngineBridge, ExecutionResponse, InstanceIntent,
+    InstanceObservation, InstancePlan, InstanceProvider, InstancePurpose, Kernel, Owner,
+    PayloadKey, PreparationProgress, PreviousWriter, Runtime, RuntimeClaim, RuntimePolicy, Store,
+    VerifiedIdentity,
 };
 use gesang_host::{EngineAdapter, EngineConnectionPolicy, EngineConnector};
 use jiff::SignedDuration;
@@ -32,6 +33,15 @@ use sqlx::{
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
+
+#[path = "../tests/support/chat-gateway.rs"]
+mod chat_gateway;
+
+#[path = "../tests/support/gateway.rs"]
+mod gateway_fixture;
+
+#[path = "engine-probe/goals.rs"]
+mod goals;
 
 struct Connector {
     url: String,
@@ -47,6 +57,67 @@ impl EngineConnector for Connector {
             .await
             .map_err(|_| gesang_core::Error::Uncertain("test execution connection failed".into()))
     }
+}
+
+struct FixtureProvider;
+
+#[async_trait]
+impl InstanceProvider for FixtureProvider {
+    async fn plan(&self, _: &RuntimeClaim) -> gesang_core::Result<InstancePlan> {
+        Ok(InstancePlan {
+            purpose: InstancePurpose::Execution,
+            provider: "interop-fixture".into(),
+            schema_version: 1,
+            definition: json!({}),
+        })
+    }
+
+    async fn allocate(&self, intent: &InstanceIntent) -> gesang_core::Result<Admission> {
+        if intent.claim.previous.is_some() {
+            return Err(gesang_core::Error::FencingRequired);
+        }
+        Ok(Admission {
+            runtime_id: intent.id,
+            locator: "isolated-test-service".into(),
+            engine_owner: intent.claim.engine_owner.clone(),
+            previous_writer: PreviousWriter::Absent,
+        })
+    }
+
+    async fn activate(&self, _: &InstanceIntent) -> gesang_core::Result<PreparationProgress> {
+        Ok(PreparationProgress::ExecutionAvailable)
+    }
+
+    async fn observe(&self, _: &Runtime) -> gesang_core::Result<InstanceObservation> {
+        Ok(InstanceObservation::Live(Activity::Waiting))
+    }
+
+    async fn retain_until(&self, _: &Runtime, _: jiff::Timestamp) -> gesang_core::Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self, _: &Runtime) -> gesang_core::Result<()> {
+        Err(gesang_core::Error::FencingRequired)
+    }
+}
+
+async fn wait_for_receipt(
+    store: &Store,
+    owner: &Owner,
+    request_id: Uuid,
+    timeout: Duration,
+) -> Result<CommandReceipt, Box<dyn Error>> {
+    let receipt = tokio::time::timeout(timeout, async {
+        loop {
+            let delivery = store.receipt(owner, request_id).await?;
+            if delivery.state != DeliveryState::Pending {
+                return gesang_core::Result::Ok(delivery);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
+    Ok(receipt)
 }
 
 #[tokio::main]
@@ -73,24 +144,6 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         .await?;
     let agent = store.ensure_agent(&owner, "execution-v1", "local").await?;
     let timeout_millis: u64 = env::var("GESANG_TEST_OPERATION_TIMEOUT_MS")?.parse()?;
-    let claim = store
-        .claim_runtime(
-            agent.id,
-            Uuid::new_v4(),
-            SignedDuration::from_millis(timeout_millis.try_into()?),
-        )
-        .await?;
-    let runtime = store
-        .admit_ready_fixture(
-            &claim,
-            &Admission {
-                runtime_id: Uuid::new_v4(),
-                locator: "isolated-test-service".into(),
-                engine_owner: "local".into(),
-                previous_writer: PreviousWriter::Absent,
-            },
-        )
-        .await?;
     let grant = store
         .select_grant(
             &owner,
@@ -107,14 +160,50 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         connections: AtomicUsize::new(0),
     });
     let timeout = Duration::from_millis(timeout_millis);
-    let adapter = EngineAdapter::new(
+    let adapter = Arc::new(EngineAdapter::new(
         store.clone(),
         connector.clone(),
         EngineConnectionPolicy {
             operation_timeout: timeout,
             idle_timeout: timeout,
         },
-    )?;
+    )?);
+    let kernel = Arc::new(Kernel::new(
+        store.clone(),
+        Arc::new(FixtureProvider),
+        adapter.clone(),
+        RuntimePolicy {
+            lease: SignedDuration::from_millis(timeout_millis.try_into()?),
+            delivery_lease: SignedDuration::from_millis(timeout_millis.try_into()?),
+            retry_delay: SignedDuration::from_millis(20),
+            recovery_interval: SignedDuration::from_millis(100),
+        },
+    )?);
+    if let Some(ready) = env::var_os("GESANG_TEST_CHAT_HOST_READY") {
+        return chat_gateway::serve(
+            &store,
+            &owner,
+            kernel,
+            adapter,
+            &grant,
+            std::path::Path::new(&ready),
+            async {
+                let _ = tokio::signal::ctrl_c().await;
+            },
+        )
+        .await;
+    }
+    let runtime = tokio::time::timeout(timeout, async {
+        loop {
+            match kernel.ensure_runtime(agent.id).await {
+                Err(gesang_core::Error::RuntimeNotReady) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                result => break result,
+            }
+        }
+    })
+    .await??;
     let request_id = Uuid::new_v4();
     eprintln!("stage: query missing receipt");
     assert!(adapter.request(&runtime, request_id).await?.is_none());
@@ -135,7 +224,16 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         },
         command: serde_json::to_value(command)?,
     };
-    eprintln!("stage: accept command");
+    let lost = CommandSubmission {
+        request_id,
+        authorization: dispatch.authorization.clone(),
+        command: dispatch.command.clone(),
+    };
+    assert_eq!(
+        kernel.submit(&owner, agent.id, &lost).await?.state,
+        DeliveryState::Pending
+    );
+    eprintln!("stage: accept command without recording its delivery acknowledgement");
     let ExecutionResponse::Accepted(receipt) = adapter.execute(&dispatch).await? else {
         panic!("expected acceptance");
     };
@@ -148,6 +246,21 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         adapter.request(&runtime, request_id).await?,
         Some(receipt.clone())
     );
+    assert_eq!(
+        store.receipt(&owner, request_id).await?.state,
+        DeliveryState::Pending
+    );
+    let (shutdown, stop_receiver) = tokio::sync::watch::channel(false);
+    let recovery_kernel = kernel.clone();
+    let recovery = tokio::spawn(async move {
+        recovery_kernel
+            .run_recovery(stop_receiver, |lane, error| eprintln!("{lane:?}: {error}"))
+            .await
+    });
+    let recovered = wait_for_receipt(&store, &owner, request_id, timeout).await?;
+    assert_eq!(recovered.state, DeliveryState::Accepted);
+    assert_eq!(recovered.engine_receipt.as_ref(), Some(&receipt));
+    eprintln!("stage: background recovery matched the original upstream acknowledgement");
     let goal_id = receipt["goalId"].as_str().unwrap();
     eprintln!("stage: snapshot and scheduler");
     assert_eq!(
@@ -202,6 +315,8 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     );
     assert!(!adapter.models(&runtime).await?.models.is_empty());
     assert_eq!(connector.connections.load(Ordering::Relaxed), 1);
+    goals::verify(&store, &owner, kernel.clone(), adapter.clone(), &goal).await?;
+    assert_eq!(connector.connections.load(Ordering::Relaxed), 2);
     let stale = Dispatch {
         request_id: Uuid::new_v4(),
         runtime: runtime.clone(),
@@ -232,9 +347,8 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         gesang_core::Result::Ok(())
     })
     .await??;
-    let stopping = Dispatch {
+    let stopping = CommandSubmission {
         request_id: Uuid::new_v4(),
-        runtime: runtime.clone(),
         authorization: CommandAuthorization::Owner,
         command: serde_json::to_value(GoalCommand::Stop {
             goal_id: goal_id.into(),
@@ -243,10 +357,13 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
                 .unwrap(),
         })?,
     };
-    assert!(matches!(
-        adapter.execute(&stopping).await?,
-        ExecutionResponse::Accepted(_)
-    ));
+    assert_eq!(
+        kernel.submit(&owner, agent.id, &stopping).await?.state,
+        DeliveryState::Pending
+    );
+    let stopped = wait_for_receipt(&store, &owner, stopping.request_id, timeout).await?;
+    assert_eq!(stopped.state, DeliveryState::Accepted);
+    eprintln!("stage: background recovery delivered a new owner control");
     tokio::time::timeout(timeout, async {
         while goal_watch.state().await?["snapshot"]["status"] != "stopped" {
             goal_watch.next().await?;
@@ -254,6 +371,8 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         gesang_core::Result::Ok(())
     })
     .await??;
+    shutdown.send(true)?;
+    tokio::time::timeout(timeout, recovery).await???;
     eprintln!("stage: retire and fence");
     let mut idle_watch = adapter.observe_goal(&runtime, goal_id).await?;
     let (interrupted, retired) = tokio::join!(idle_watch.next(), adapter.retire(&runtime));
@@ -290,7 +409,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     assert!(adapter.request(&runtime, request_id).await.is_err());
     println!(
         "{}",
-        json!({"reusedConnection":true,"reconciled":true,"rejected":true,"retired":true,"staleRejected":true})
+        json!({"reusedConnection":true,"reconciled":true,"backgroundDelivery":true,"backgroundRecovery":true,"goalRoutes":true,"rejected":true,"retired":true,"staleRejected":true})
     );
     Ok(())
 }

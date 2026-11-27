@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{Error, InstanceIntent, InstancePlan, PreparationProgress, Result};
+use crate::{
+    CoordinationTransaction, Error, InstanceIntent, InstancePlan, PreparationProgress, Result,
+};
 
 /// An issuer and subject already authenticated by the embedding host.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +137,15 @@ pub enum EnginePreparation {
     Pending,
     /// Storage is restored and the execution scheduler remains paused.
     Ready,
+}
+
+/// Host authority checked in the same transaction as command admission.
+#[async_trait]
+pub trait CommandAdmissionCheck: Send + Sync {
+    /// Verifies current caller authority before the transaction reads the agent or its commands.
+    ///
+    /// A rejection rolls back admission. Resolve external network calls before starting the transaction.
+    async fn authorize(&self, tx: &mut CoordinationTransaction<'_, '_>) -> Result<()>;
 }
 
 /// Capabilities derived by the trusted adapter from a validated command.

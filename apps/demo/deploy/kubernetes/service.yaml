@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gesang-state
+spec:
+  accessModes: [ReadWriteOncePod]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gesang
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gesang
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gesang
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: gesang
+          image: gesang-demo-service
+          envFrom:
+            - configMapRef:
+                name: gesang-settings
+          env:
+            - name: GESANG_DEMO_DATA_DIR
+              value: /state/gesang
+            - name: GESANG_DEMO_MODEL_API_KEY_FILE
+              value: /run/gesang-model/api-key
+            - name: GESANG_DEMO_SANDBOX_TLS_DIR
+              value: /run/gesang-client-tls
+          readinessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - fetch('http://127.0.0.1:' + (process.env.GESANG_DEMO_PORT ?? '8787') + '/api/models').then(r => {if (!r.ok) process.exit(1)})
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: state, mountPath: /state }
+            - { name: model, mountPath: /run/gesang-model, readOnly: true }
+            - { name: tls, mountPath: /run/gesang-client-tls, readOnly: true }
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: gesang-state
+        - name: model
+          secret:
+            secretName: gesang-model
+            defaultMode: 0440
+        - name: tls
+          secret:
+            secretName: gesang-client-tls
+            defaultMode: 0440

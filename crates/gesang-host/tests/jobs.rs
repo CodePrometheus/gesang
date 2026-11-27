@@ -1,4 +1,4 @@
-//! Real broker metadata and authorization; physical worker observations are explicit fixtures.
+//! Broker metadata, authorization and opt-in native command recovery.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::{
@@ -40,6 +40,15 @@ use uuid::Uuid;
 #[path = "jobs/node-client.rs"]
 mod node_client;
 
+#[path = "jobs/native-worker.rs"]
+mod native_worker;
+
+#[path = "jobs/native-chat.rs"]
+mod native_chat;
+
+#[path = "support/gateway.rs"]
+mod gateway_fixture;
+
 #[path = "jobs/sqlite.rs"]
 mod sqlite;
 
@@ -74,6 +83,7 @@ struct Worker {
     starts: AtomicUsize,
     launch: Mutex<Option<WorkerStart>>,
     lookups: Mutex<Vec<(Uuid, Option<Uuid>)>>,
+    forward: Option<Arc<dyn WorkerTransport>>,
 }
 
 impl Worker {
@@ -90,7 +100,7 @@ impl Worker {
 impl WorkerTransport for Worker {
     async fn locate(
         &self,
-        _caller: &Caller,
+        caller: &Caller,
         request: &Request,
         expected: Option<Uuid>,
     ) -> chopin_job_broker::Result<WorkerEndpoint> {
@@ -98,6 +108,9 @@ impl WorkerTransport for Worker {
             .lock()
             .unwrap()
             .push((request.domain, expected));
+        if let Some(forward) = &self.forward {
+            return forward.locate(caller, request, expected).await;
+        }
         if expected.is_some_and(|id| id != self.id) {
             return Err(JobError::Conflict);
         }
@@ -110,19 +123,25 @@ impl WorkerTransport for Worker {
 
     async fn start(
         &self,
-        _: &WorkerEndpoint,
+        endpoint: &WorkerEndpoint,
         launch: &WorkerStart,
     ) -> chopin_job_broker::Result<WorkerObservation> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         *self.launch.lock().unwrap() = Some(launch.clone());
+        if let Some(forward) = &self.forward {
+            return forward.start(endpoint, launch).await;
+        }
         Ok(self.observation(launch.id))
     }
 
     async fn observe(
         &self,
-        _: &WorkerEndpoint,
+        endpoint: &WorkerEndpoint,
         id: JobId,
     ) -> chopin_job_broker::Result<Option<WorkerObservation>> {
+        if let Some(forward) = &self.forward {
+            return forward.observe(endpoint, id).await;
+        }
         Ok(self
             .launch
             .lock()
@@ -134,9 +153,12 @@ impl WorkerTransport for Worker {
 
     async fn stop(
         &self,
-        _: &WorkerEndpoint,
+        endpoint: &WorkerEndpoint,
         id: JobId,
     ) -> chopin_job_broker::Result<WorkerObservation> {
+        if let Some(forward) = &self.forward {
+            return forward.stop(endpoint, id).await;
+        }
         Ok(self.observation(id))
     }
 }
@@ -208,7 +230,7 @@ async fn allocate(
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    async fn isolated_store() -> (Store, String) {
         let url = std::env::var("GESANG_TEST_DATABASE_URL").expect("integration database required");
         let schema = format!("test_{}", Uuid::new_v4().simple());
         let bootstrap = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -231,6 +253,11 @@ impl Fixture {
             .execute(store.pool())
             .await
             .unwrap();
+        (store, schema)
+    }
+
+    async fn new() -> Self {
+        let (store, schema) = Self::isolated_store().await;
         let owner = store
             .bind_owner(&VerifiedIdentity {
                 issuer: "jobs".into(),
@@ -260,6 +287,10 @@ impl Fixture {
             )
             .await
             .unwrap();
+        Self::with_runtime(store, owner, runtime, grant)
+    }
+
+    fn with_runtime(store: Store, owner: Owner, runtime: Runtime, grant: Grant) -> Self {
         let key = Arc::new(JobControlKey::new([17; 32]));
         let policy = Arc::new(Policy::default());
         let authority = Arc::new(JobAuthority::new(
@@ -273,6 +304,7 @@ impl Fixture {
             starts: AtomicUsize::new(0),
             launch: Mutex::new(None),
             lookups: Mutex::new(vec![]),
+            forward: None,
         });
         let settings = Settings {
             version: 1,

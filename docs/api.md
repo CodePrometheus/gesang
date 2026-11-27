@@ -20,7 +20,33 @@ The platform API uses versioned paths and camelCase JSON fields. Authentication 
 | `DELETE /v1/agents/{id}/grant/{grantId}` | Idempotent grant revocation for the authenticated owner |
 | `POST /v1/agents/{id}/commands` | Encrypted durable outbox acceptance using a stable request ID; pending does not mean the execution service accepted it |
 | `GET /v1/requests/{id}` | Original delivery result, scoped to the authenticated owner |
+| `GET /v1/agents/{id}/goals?limit={count}` | One page of the execution-owned goal list and its optional cursor |
 | `GET /v1/agents/{id}/goals/{goalId}` | Execution-owned goal snapshot, with no parallel platform goal state machine |
+| `GET /v1/agents/{id}/goals/{goalId}/conversation` | Current bounded conversation window for the goal's original conversation |
+| `GET /v1/agents/{id}/goals/{goalId}/artifacts` | The goal's published attachment metadata under `artifacts` |
+| `GET /v1/agents/{id}/goals/{goalId}/artifacts/{artifactId}` | Verified original attachment bytes and a SHA-256 HTTP content digest |
+
+The command routes are implemented by `gesang_host::CommandGateway`. The host
+registers an authenticator in its service catalog and supplies a
+`CommandGatewayPolicy` that rechecks credential authority in the same
+transaction as admission. The built-in `ServiceAccess` policy uses the
+PostgreSQL coordination transaction. Hosts using another database provide
+their own transaction-bound credential policy.
+
+Grant `submit_command_scope(agent_id)` and `observe_command_scope(agent_id)` to
+authorize the corresponding owner requests. Admission returns HTTP 202
+while delivery is pending and HTTP 200 for an already settled receipt.
+`Location` identifies the original receipt. Use that URL to inspect delivery
+after an interrupted client connection or host restart.
+
+Mount the `gesang_host::GoalGateway` beside the command routes to read the original
+goal and its results. The owner credential needs `observe_goal_scope(agent_id)`.
+To read the next page, send the previous response's cursor as a JSON object
+encoded in the `cursor` query parameter.
+The host supplies an `ArtifactDownloadPolicy` with per-file and concurrent response
+limits. Downloads return bytes after verifying the original publication's size
+and checksum. An oversized publication returns HTTP 413. A read that cannot be
+resolved against the current execution authority returns HTTP 503.
 
 The command body contains `requestId`, `authorization`, and the upstream typed
 `command`. Authorization is either `{"kind":"owner"}` for owner control, or

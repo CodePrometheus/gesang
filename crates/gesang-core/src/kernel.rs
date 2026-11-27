@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
+    time::Duration,
 };
 
 use gesang_api::{ApiProblem, CommandAuthorization, CommandReceipt, CommandSubmission};
@@ -14,6 +15,19 @@ use crate::{
     InstanceObservation, InstancePhase, InstanceProvider, InstancePurpose, Owner,
     PreparationProgress, PreviousWriter, RequiredAuthority, Result, Runtime, Store,
 };
+
+/// The source of a failure while recovering persisted work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryLane {
+    /// The host's published runtime policy could not be resolved.
+    Policy,
+    /// A persisted command could not be delivered or reconciled.
+    Delivery,
+    /// A due execution instance could not be resumed.
+    Wake,
+    /// A prior execution instance could not be verified retired.
+    Retirement,
+}
 
 /// Explicit deployment timing policy; no hidden lease, retry, or history limits are supplied.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,6 +203,25 @@ impl Kernel {
         Self::with_coordination_store(Arc::new(store), provider, engine, policy)
     }
 
+    /// Atomically verifies an external caller's authority and accepts platform delivery.
+    ///
+    /// The external check and the kernel's own owner and delegation checks use
+    /// the command's admission transaction.
+    pub async fn submit_checked(
+        &self,
+        owner: &Owner,
+        agent_id: Uuid,
+        command: &CommandSubmission,
+        check: &dyn crate::CommandAdmissionCheck,
+    ) -> Result<CommandReceipt> {
+        let requirements = self
+            .engine
+            .authorize_command(&command.command, &command.authorization)?;
+        self.store
+            .enqueue_checked(owner, agent_id, command, &requirements, Some(check))
+            .await
+    }
+
     /// Uses the built-in store and records each controller's published policy adoption.
     pub async fn with_configuration(
         store: Store,
@@ -292,6 +325,14 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
     pub async fn ensure_runtime(&self, agent_id: Uuid) -> Result<Runtime> {
         let policy = self.policy.get(self.controller_id).await?;
         self.ensure_runtime_with_policy(agent_id, &policy).await
+    }
+
+    /// Resolves the current runtime only within the authenticated owner's agent.
+    /// Missing and foreign agents return `Error::NotFound` before allocation.
+    /// Availability and fencing errors propagate from `Self::ensure_runtime`.
+    pub async fn ensure_owner_runtime(&self, owner: &Owner, agent_id: Uuid) -> Result<Runtime> {
+        self.store.agent(owner, agent_id).await?;
+        self.ensure_runtime(agent_id).await
     }
 
     async fn ensure_runtime_with_policy(
@@ -500,9 +541,75 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
         }
     }
 
+    /// Drives durable delivery, wake and retirement until the host signals shutdown.
+    ///
+    /// An initial policy must be available. Later failures are reported and retried
+    /// according to the last adopted policy. Shutdown finishes the current pass before
+    /// returning; the host owns the provider and execution connection shutdown.
+    pub async fn run_recovery(
+        &self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        mut report: impl FnMut(RecoveryLane, &Error) + Send,
+    ) -> Result<()> {
+        if recovery_stopped(&shutdown) {
+            return Ok(());
+        }
+        let mut policy = self.runtime_policy().await?;
+        while !recovery_stopped(&shutdown) {
+            match self.runtime_policy().await {
+                Ok(current) => {
+                    policy = current;
+                    if recovery_stopped(&shutdown) {
+                        break;
+                    }
+                    let (delivery, wake, retirement) = tokio::join!(
+                        self.dispatch_one_with_policy(&policy),
+                        self.wake_one_with_policy(&policy),
+                        self.retire_one_with_policy(&policy)
+                    );
+                    let mut progress = false;
+                    let mut failed = false;
+                    for (lane, outcome) in [
+                        (RecoveryLane::Delivery, delivery),
+                        (RecoveryLane::Wake, wake),
+                        (RecoveryLane::Retirement, retirement),
+                    ] {
+                        match outcome {
+                            Ok(worked) => progress |= worked,
+                            Err(error) => {
+                                failed = true;
+                                report(lane, &error);
+                            }
+                        }
+                    }
+                    if progress && !failed {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                }
+                Err(error) => report(RecoveryLane::Policy, &error),
+            }
+            let delay = Duration::try_from(policy.retry_delay.min(policy.recovery_interval))
+                .map_err(|_| Error::InvalidCommand("recovery delay is out of range".into()))?;
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                change = shutdown.changed() => {
+                    if change.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Processes one durable retirement, including launches that never reached runtime admission.
     pub async fn retire_one(&self) -> Result<bool> {
-        let policy = self.policy.get(self.controller_id).await?;
+        let policy = self.runtime_policy().await?;
+        self.retire_one_with_policy(&policy).await
+    }
+
+    async fn retire_one_with_policy(&self, policy: &RuntimePolicy) -> Result<bool> {
         let Some(retirement) = self
             .store
             .claim_retirement(Uuid::new_v4(), policy.delivery_lease)
@@ -518,7 +625,11 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
 
     /// Reconciles and delivers at most one command, preserving uncertainty and request identity.
     pub async fn dispatch_one(&self) -> Result<bool> {
-        let policy = self.policy.get(self.controller_id).await?;
+        let policy = self.runtime_policy().await?;
+        self.dispatch_one_with_policy(&policy).await
+    }
+
+    async fn dispatch_one_with_policy(&self, policy: &RuntimePolicy) -> Result<bool> {
         let claimant = Uuid::new_v4();
         let Some(command) = self
             .store
@@ -527,7 +638,7 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
         else {
             return Ok(false);
         };
-        let result = self.deliver(&command, &policy).await;
+        let result = self.deliver(&command, policy).await;
         if result.is_err() {
             self.store
                 .defer_command(&command, Timestamp::now() + policy.retry_delay)
@@ -608,7 +719,11 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
 
     /// Resumes one persistently due agent and conditionally settles its exact wake revision.
     pub async fn wake_one(&self) -> Result<bool> {
-        let policy = self.policy.get(self.controller_id).await?;
+        let policy = self.runtime_policy().await?;
+        self.wake_one_with_policy(&policy).await
+    }
+
+    async fn wake_one_with_policy(&self, policy: &RuntimePolicy) -> Result<bool> {
         let Some(claim) = self
             .store
             .claim_wake(Uuid::new_v4(), policy.delivery_lease)
@@ -616,7 +731,7 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
         else {
             return Ok(false);
         };
-        let result = self.resume_agent(claim.agent_id, &policy).await;
+        let result = self.resume_agent(claim.agent_id, policy).await;
         match result {
             Ok(next) => self.store.settle_wake(&claim, next).await?,
             Err(error) => {
@@ -654,8 +769,11 @@ impl<S: CoordinationStore + ?Sized> Kernel<S> {
         agent_id: Uuid,
         goal_id: &str,
     ) -> Result<serde_json::Value> {
-        self.store.agent(owner, agent_id).await?;
-        let runtime = self.ensure_runtime(agent_id).await?;
+        let runtime = self.ensure_owner_runtime(owner, agent_id).await?;
         self.engine.snapshot(&runtime, goal_id).await
     }
+}
+
+fn recovery_stopped(shutdown: &tokio::sync::watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
 }

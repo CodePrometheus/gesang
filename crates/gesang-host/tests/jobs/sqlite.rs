@@ -89,6 +89,7 @@ fn broker(
         starts: AtomicUsize::new(0),
         launch: Mutex::new(None),
         lookups: Mutex::new(vec![]),
+        forward: None,
     });
     let broker = Broker::with_ledger(
         LedgerStore::Sqlite(store.sqlite_pool().unwrap().clone()),

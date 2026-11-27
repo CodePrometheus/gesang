@@ -1,0 +1,85 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: gesang-workspace
+spec:
+  service: false
+  failedPodPolicy: Retain
+  shutdownPolicy: Retain
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gesang-workspace
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: workspace
+          image: gesang-demo-sandbox-workspace
+          command: [/usr/local/bin/loopback-listener, "7070", /usr/local/bin/pi-env]
+          workingDir: /workspace
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: work, mountPath: /workspace }
+        - name: tls
+          image: gesang-demo-sandbox-workspace
+          command:
+            - /usr/bin/socat
+            - OPENSSL-LISTEN:7443,reuseaddr,fork,verify=1,cafile=/run/tls/ca.crt,cert=/run/tls/tls.crt,key=/run/tls/tls.key
+            - TCP4:127.0.0.1:7070
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: tls, mountPath: /run/tls, readOnly: true }
+      volumes:
+        - name: tls
+          secret:
+            secretName: gesang-server-tls
+            defaultMode: 0440
+  volumeClaimTemplates:
+    - metadata:
+        name: work
+      spec:
+        accessModes: [ReadWriteOncePod]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gesang-workspace
+spec:
+  selector:
+    app.kubernetes.io/name: gesang-workspace
+  ports:
+    - { name: daemon, port: 7443, targetPort: 7443 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gesang-workspace
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gesang-workspace
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gesang
+      ports:
+        - { protocol: TCP, port: 7443 }
+  egress: []

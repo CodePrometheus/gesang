@@ -32,7 +32,7 @@ fn run() -> Result<()> {
     match task.to_str() {
         Some("help" | "--help" | "-h") => {
             println!(
-                "Usage: cargo xtask <task>\n\nTasks:\n  check                Formatting, strict lint, unit tests, and API documentation\n  fmt                  Check repository formatting without changing files\n  lint                 Strict static checks for every workspace target\n  test                 Workspace tests, excluding explicitly ignored integration tests\n  test-engine          Real service and host protocol integration; requires explicit integration settings\n  test-store           Real transactional store tests; requires GESANG_TEST_DATABASE_URL\n  test-jobs            Real Node command client, broker admission and original-operation recovery\n  test-command-goals   Real encrypted goal recovery through shared authority and command broker\n  test-sandbox         Real resource API and process recovery; requires explicit local runtime settings\n  prepare-sql          Generate offline query metadata from source migrations in an isolated test schema\n  check-sql            Verify query metadata against source migrations in an isolated test schema\n  test-storage         Real native execution storage recovery; requires explicit integration settings\n  test-initialization  Real native first-store creation and reconciliation through shared custody\n  doc                  Check API documentation with warnings treated as errors\n  android-setup        Install the pinned official native toolchain\n  android-native       Build native libraries and generated Kotlin bindings"
+                "Usage: cargo xtask <task>\n\nTasks:\n  check                Formatting, strict lint, unit tests, and API documentation\n  fmt                  Check repository formatting without changing files\n  lint                 Strict static checks for every workspace target\n  test                 Workspace tests, excluding explicitly ignored integration tests\n  test-engine          Real service and host protocol integration; requires explicit integration settings\n  test-store           Real transactional store tests; requires GESANG_TEST_DATABASE_URL\n  test-jobs            Real Node command client, broker admission and original-operation recovery\n  test-command-goals   Real encrypted goal recovery through shared authority and command broker\n  test-native-command-goals  Real encrypted goal recovery with an isolated Linux worker\n  test-native-chat     Browser and file delivery with a real local model and Linux worker\n  test-sandbox         Real resource API and process recovery; requires explicit local runtime settings\n  prepare-sql          Generate offline query metadata from source migrations in an isolated test schema\n  check-sql            Verify query metadata against source migrations in an isolated test schema\n  test-storage         Real native execution storage recovery; requires explicit integration settings\n  test-initialization  Real native first-store creation and reconciliation through shared custody\n  doc                  Check API documentation with warnings treated as errors\n  android-setup        Install the pinned official native toolchain\n  android-native       Build native libraries and generated Kotlin bindings"
             );
             Ok(())
         }
@@ -54,33 +54,28 @@ fn run() -> Result<()> {
             command.arg("scripts/test-engine.py");
             execute(command)
         }
-        Some("test-command-goals") => {
-            for name in [
-                "GESANG_TEST_DATABASE_URL",
+        Some("test-command-goals") => protected_jobs_probe(
+            "node_client::goal_restart",
+            &["GESANG_TEST_COMMAND_GOAL_PROBE"],
+        ),
+        Some("test-native-command-goals") => protected_jobs_probe(
+            "node_client::goal_restart_with_native_worker",
+            &[
                 "GESANG_TEST_COMMAND_GOAL_PROBE",
-                "CHOPIN_STORAGE_NATIVE",
-                "GESANG_TEST_OPERATION_TIMEOUT_MS",
-            ] {
-                if env::var_os(name).is_none_or(|value| value.is_empty()) {
-                    return Err(io::Error::other(format!(
-                        "{name} is required for protected command goal recovery tests"
-                    ))
-                    .into());
-                }
-            }
-            cargo(&[
-                "test",
-                "--locked",
-                "-p",
-                "gesang-host",
-                "--test",
-                "jobs",
-                "node_client::goal_restart",
-                "--",
-                "--ignored",
-                "--nocapture",
-            ])
-        }
+                "GESANG_TEST_NATIVE_WORKER_RUNNER",
+            ],
+        ),
+        Some("test-native-chat") => protected_jobs_probe(
+            "native_chat::publish_from_chat",
+            &[
+                "GESANG_TEST_NATIVE_WORKER_RUNNER",
+                "GESANG_TEST_NATIVE_CHAT_DIR",
+                "GESANG_TEST_NATIVE_CHAT_CHROME_URL",
+                "GESANG_TEST_CHOPIN_SOURCE",
+                "GESANG_TEST_MODEL_URL",
+                "GESANG_TEST_MODEL_ID",
+            ],
+        ),
         Some("test-jobs") => {
             for name in [
                 "GESANG_TEST_DATABASE_URL",
@@ -151,6 +146,8 @@ fn run() -> Result<()> {
                 "--nocapture",
                 "--skip",
                 "node_client::",
+                "--skip",
+                "native_chat::",
             ])?;
             cargo(&[
                 "test",
@@ -224,6 +221,35 @@ fn run() -> Result<()> {
 
 fn formatting() -> Result<()> {
     cargo(&["fmt", "--all", "--check"])
+}
+
+fn protected_jobs_probe(test: &str, extra_settings: &[&str]) -> Result<()> {
+    let settings = [
+        "GESANG_TEST_DATABASE_URL",
+        "CHOPIN_STORAGE_NATIVE",
+        "GESANG_TEST_OPERATION_TIMEOUT_MS",
+    ];
+    for name in settings.iter().chain(extra_settings) {
+        if env::var_os(name).is_none_or(|value| value.is_empty()) {
+            return Err(io::Error::other(format!(
+                "{name} is required for the protected execution probe"
+            ))
+            .into());
+        }
+    }
+    cargo(&[
+        "test",
+        "--locked",
+        "-p",
+        "gesang-host",
+        "--test",
+        "jobs",
+        test,
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+    ])
 }
 
 fn lint() -> Result<()> {

@@ -38,9 +38,13 @@ Gesang build if your environment provides an unrelated `DATABASE_URL`.
    writer starts, it must independently confirm that the previous writer
    stopped or lost storage access.
 3. Construct the shared `EngineAdapter` and `Kernel`. Configure the operation
-   timeouts and recovery intervals for your deployment. Run the host's
-   delivery, wake, and retirement loops through `dispatch_one`, `wake_one`,
-   and `retire_one`.
+   timeouts and recovery intervals for your deployment. Run
+   `Kernel::run_recovery` under the host's supervisor and report recovery
+   failures through its callback. It drives delivery, wake, and retirement
+   independently of client connections. On shutdown, close request admission,
+   signal the recovery loop, await its current pass, then close the execution
+   adapter. Hosts with their own scheduler can call `dispatch_one`, `wake_one`,
+   and `retire_one` directly.
 4. Mount `ControlPlane::router` on the protected runtime callback listener.
    Supply the actual `ControlPolicy` and separate credential material.
    First-store initialization and execution key release are explicitly enabled
@@ -107,6 +111,8 @@ use `Kernel::snapshot` with the original owner, agent, and goal ID. For a live
 view, use `EngineAdapter::observe_goal` with the host-verified runtime. Retain
 Chopin's original operation IDs and output cursors when reading command output.
 
-Use the [API contracts](api.md) to map these calls to your application's routes.
+Mount `CommandGateway` and `GoalGateway` to expose admission, receipt lookup, and
+the original goal's conversation and artifacts through the same kernel and engine.
+The [API contracts](api.md) describe the owner scopes and attachment download policy.
 Run the [deployment checks](verification.md) in the target environment before
 enabling live model and workspace access.

@@ -2,18 +2,18 @@
 
 use std::{process::Stdio, time::Duration};
 
-use axum::Router;
+use axum::{Router, extract, http::Method, middleware};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
     process::Command,
-    sync::oneshot,
+    sync::{oneshot, watch},
     time::timeout,
 };
 
 use super::*;
 
-struct GoalControlPolicy;
+pub(super) struct GoalControlPolicy;
 
 #[async_trait]
 impl gesang_host::ControlPolicy for GoalControlPolicy {
@@ -38,7 +38,7 @@ impl gesang_host::ControlPolicy for GoalControlPolicy {
     }
 }
 
-struct FixtureKeyVerifier;
+pub(super) struct FixtureKeyVerifier;
 
 #[async_trait]
 impl gesang_core::ServiceKeyVerifier for FixtureKeyVerifier {
@@ -211,6 +211,16 @@ async fn interrupted_submit() {
 #[tokio::test]
 #[ignore = "requires isolated database, compiled goal service, native store and explicit deadline"]
 async fn goal_restart() {
+    run_goal_restart(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated native worker runner, transactional database and compiled goal service"]
+async fn goal_restart_with_native_worker() {
+    run_goal_restart(true).await;
+}
+
+async fn run_goal_restart(use_native: bool) {
     let probe = std::env::var("GESANG_TEST_COMMAND_GOAL_PROBE")
         .expect("compiled command goal probe required");
     let native = std::env::var("CHOPIN_STORAGE_NATIVE").expect("compiled native store required");
@@ -219,9 +229,21 @@ async fn goal_restart() {
         .parse()
         .unwrap();
     assert!(milliseconds > 0);
-    let f = Fixture::new().await;
+    let mut f = Fixture::new().await;
     let caller = f.caller(&f.runtime).await;
-    let request = f.request();
+    let mut request = f.request();
+    if use_native {
+        request.argv = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            r#"set -e
+printf 'effect\n' >> /workspace/effect
+IFS= read -r gate < /workspace/release
+test "$gate" = continue
+printf 'shared goal result\n'"#
+                .into(),
+        ];
+    }
     let goal = Uuid::new_v4();
     let key = Arc::new(gesang_host::ControlKey::new([19; 32]));
     let control_credential = key.issue(&f.runtime).unwrap();
@@ -251,12 +273,32 @@ async fn goal_restart() {
     )
     .unwrap()
     .with_execution_custody(custody);
-    let broker = Arc::new(f.broker);
-    let router = Router::new()
-        .nest("/commands", broker.clone().router())
-        .merge(plane.router(NonZeroUsize::new(f.settings.max_body_bytes).unwrap()));
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let base = format!("http://{}/", listener.local_addr().unwrap());
+    let mut worker_runner = if use_native {
+        Some(super::native_worker::NativeWorker::start(&mut f, &base, milliseconds).await)
+    } else {
+        None
+    };
+    let broker = Arc::new(f.broker);
+    let (command_started, receipt_gate) = watch::channel(!use_native);
+    let commands = broker.clone().router().layer(middleware::from_fn(
+        move |request: extract::Request, next: middleware::Next| {
+            let mut gate = receipt_gate.clone();
+            async move {
+                let submission = request.method() == Method::PUT;
+                let response = next.run(request).await;
+                if submission && response.status().is_success() {
+                    // Keep the response pending until the real command has started.
+                    let _ = gate.wait_for(|started| *started).await;
+                }
+                response
+            }
+        },
+    ));
+    let router = Router::new()
+        .nest("/commands", commands)
+        .merge(plane.router(NonZeroUsize::new(f.settings.max_body_bytes).unwrap()));
     let (shutdown, stopped) = oneshot::channel();
     let server = tokio::spawn(async move {
         axum::serve(listener, router)
@@ -324,6 +366,10 @@ async fn goal_restart() {
         text
     });
     let result = timeout(Duration::from_millis(milliseconds), async {
+        if let Some(native) = &mut worker_runner {
+            native.verify_effect().await;
+            command_started.send(true).unwrap();
+        }
         let first = lines.next_line().await.unwrap();
         if first.is_none() { panic!("command goal probe exited before interruption: {}", (&mut diagnostic).await.unwrap()); }
         assert_eq!(first.as_deref(), Some("interrupted"));
@@ -332,23 +378,55 @@ async fn goal_restart() {
         assert_eq!(launch.request.argv, request.argv);
         assert!(launch.request.env.is_empty()); assert!(!launch.request.inherit_env);
         assert_eq!(f.worker.starts.load(Ordering::SeqCst), 1);
-        let callback = f.authority.authenticate_worker(launch.callback.credential.expose()).await.unwrap();
-        let process = ProcessIdentity { domain: request.domain, boot: Uuid::new_v4(), init_pid: 42, start_ticks: 11, namespace_inode: 23 };
-        for event in [
-            WorkerEvent::Attached { process: process.clone() }, WorkerEvent::Release, WorkerEvent::Started,
-            WorkerEvent::Output { sequence: 1, stream: Stream::Stdout, data: BASE64_URL_SAFE_NO_PAD.encode(output) },
-            WorkerEvent::Exited { exit: ExitStatus::Code(0) }, WorkerEvent::OutputComplete { sequence: 1 },
-            WorkerEvent::Drained { process, sequence: 1 },
-        ] { broker.worker_event(&callback, event).await.unwrap(); }
+        if let Some(native) = &mut worker_runner {
+            let original = loop {
+                let observed = broker.get(&caller, launch.id.operation).await.unwrap();
+                assert!(
+                    observed.state.primary_exit.is_none(),
+                    "worker exited before release: {:?}",
+                    observed.state.primary_exit,
+                );
+                if observed.state.started {
+                    break observed.state.process.unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            native.release().await;
+            loop {
+                let settled = broker.get(&caller, launch.id.operation).await.unwrap();
+                if settled.state.phase == Phase::Drained {
+                    assert_eq!(settled.state.process, Some(original));
+                    assert_eq!(settled.state.primary_exit, Some(ExitStatus::Code(0)));
+                    assert!(settled.state.output_complete);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            native.verify_effect().await;
+            println!("native worker finished the original process while the executor was down; the workspace effect occurred once");
+        } else {
+            let callback = f.authority.authenticate_worker(launch.callback.credential.expose()).await.unwrap();
+            let process = ProcessIdentity { domain: request.domain, boot: Uuid::new_v4(), init_pid: 42, start_ticks: 11, namespace_inode: 23 };
+            for event in [
+                WorkerEvent::Attached { process: process.clone() }, WorkerEvent::Release, WorkerEvent::Started,
+                WorkerEvent::Output { sequence: 1, stream: Stream::Stdout, data: BASE64_URL_SAFE_NO_PAD.encode(output) },
+                WorkerEvent::Exited { exit: ExitStatus::Code(0) }, WorkerEvent::OutputComplete { sequence: 1 },
+                WorkerEvent::Drained { process, sequence: 1 },
+            ] { broker.worker_event(&callback, event).await.unwrap(); }
+        }
         child.stdin.take().unwrap().write_all(b"resume\n").await.unwrap();
         let line = lines.next_line().await.unwrap();
         let status = child.wait().await.unwrap();
         (status, line)
     }).await;
+    drop(command_started);
     if result.is_err() {
         child.kill().await.unwrap();
     }
     let diagnostic = diagnostic.await.unwrap();
+    if let Some(worker) = worker_runner {
+        worker.close().await;
+    }
     shutdown.send(()).unwrap();
     server.await.unwrap();
     let (status, line) =

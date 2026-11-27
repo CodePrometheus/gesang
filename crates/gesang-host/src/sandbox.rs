@@ -1,5 +1,6 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
+use crate::routes::{ApiFailure, HostAccess, no_store};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, OriginalUri, Path, State},
@@ -8,16 +9,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use gesang_api::ApiProblem;
 use gesang_core::{ConfigurationAccess, PluginCatalog, ResourceBinding, Store};
 use gesang_plugins::{Authority, Graph};
 use gesang_services::{
-    Authenticate, Caller, CreateSandbox, OperationStatus, Sandbox, SandboxOperation,
-    authentication_interface, sandbox_interface,
+    Caller, CreateSandbox, OperationStatus, Sandbox, SandboxOperation, sandbox_interface,
 };
 use serde::Deserialize;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 /// Authenticated resource routes shared by standalone and embedded hosts.
 ///
@@ -27,10 +25,7 @@ use zeroize::Zeroizing;
 #[derive(Clone, Debug)]
 pub struct SandboxGateway {
     platform: Store,
-    catalog: PluginCatalog,
-    graph: Graph,
-    configuration: ConfigurationAccess,
-    host: Authority,
+    access: HostAccess,
 }
 
 impl SandboxGateway {
@@ -46,17 +41,9 @@ impl SandboxGateway {
         configuration: ConfigurationAccess,
         host: Authority,
     ) -> gesang_services::Result<Self> {
-        if host.owner_scope().is_some() {
-            return Err(gesang_services::Error::Invalid(
-                "a host service identity is required".into(),
-            ));
-        }
         Ok(Self {
             platform,
-            catalog,
-            graph,
-            configuration,
-            host,
+            access: HostAccess::new(catalog, graph, configuration, host)?,
         })
     }
 
@@ -77,57 +64,15 @@ impl SandboxGateway {
             .with_state(self)
     }
 
-    async fn caller(&self, headers: &HeaderMap) -> Result<Caller, ApiFailure> {
-        let mut credentials = headers.get_all(header::AUTHORIZATION).iter();
-        let value = credentials.next().ok_or_else(ApiFailure::unauthorized)?;
-        if credentials.next().is_some() {
-            return Err(ApiFailure::unauthorized());
-        }
-        let (scheme, value) = value
-            .to_str()
-            .map_err(|_| ApiFailure::unauthorized())?
-            .split_once(' ')
-            .ok_or_else(ApiFailure::unauthorized)?;
-        if !scheme.eq_ignore_ascii_case("Bearer") || value.is_empty() {
-            return Err(ApiFailure::unauthorized());
-        }
-        let credential = Zeroizing::new(value.to_owned());
-        let interface = authentication_interface();
-        let endpoint = self
-            .catalog
-            .selected(&self.configuration, self.host.binding(), &interface)
-            .await
-            .map_err(|_| ApiFailure::unavailable())?;
-        let service = self
-            .catalog
-            .service::<Arc<dyn Authenticate>>(
-                &self.configuration,
-                &self.graph,
-                &endpoint,
-                &interface,
-            )
-            .await
-            .map_err(|_| ApiFailure::unavailable())?;
-        let caller = service
-            .call(&self.host, move |service, _| {
-                Box::pin(async move { service.authenticate(&credential).await })
-            })
-            .await
-            .map_err(|_| ApiFailure::unavailable())??;
-        if caller.authority().binding() != self.host.binding() {
-            return Err(ApiFailure::forbidden());
-        }
-        Ok(caller)
-    }
-
     async fn service(
         &self,
         binding: &ResourceBinding,
     ) -> Result<gesang_plugins::ServiceHandle<Arc<dyn Sandbox>>, ApiFailure> {
-        self.catalog
+        self.access
+            .catalog
             .service(
-                &self.configuration,
-                &self.graph,
+                &self.access.configuration,
+                &self.access.graph,
                 &binding.endpoint,
                 &sandbox_interface(),
             )
@@ -142,11 +87,12 @@ async fn create(
     OriginalUri(uri): OriginalUri,
     Json(request): Json<CreateSandbox>,
 ) -> Result<Response, ApiFailure> {
-    let caller = gateway.caller(&headers).await?;
+    let caller = gateway.access.caller(&headers).await?;
     let binding = gateway
+        .access
         .catalog
         .reserve(
-            &gateway.configuration,
+            &gateway.access.configuration,
             caller.authority(),
             &sandbox_interface(),
             request.request_id,
@@ -181,7 +127,7 @@ async fn observe(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiFailure> {
-    let caller = gateway.caller(&headers).await?;
+    let caller = gateway.access.caller(&headers).await?;
     let binding = gateway
         .platform
         .resource_binding(caller.authority(), id)
@@ -210,7 +156,7 @@ async fn stop(
     OriginalUri(uri): OriginalUri,
     Json(request): Json<StopRequest>,
 ) -> Result<Response, ApiFailure> {
-    let caller = gateway.caller(&headers).await?;
+    let caller = gateway.access.caller(&headers).await?;
     let binding = gateway
         .platform
         .resource_binding(caller.authority(), id)
@@ -235,7 +181,7 @@ async fn operation(
     headers: HeaderMap,
     Path((id, request_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, ApiFailure> {
-    let caller = gateway.caller(&headers).await?;
+    let caller = gateway.access.caller(&headers).await?;
     let binding = gateway
         .platform
         .resource_binding(caller.authority(), id)
@@ -248,7 +194,7 @@ async fn request(
     headers: HeaderMap,
     Path(request_id): Path<Uuid>,
 ) -> Result<Response, ApiFailure> {
-    let caller = gateway.caller(&headers).await?;
+    let caller = gateway.access.caller(&headers).await?;
     let binding = gateway
         .platform
         .resource_request(caller.authority(), &sandbox_interface(), request_id)
@@ -285,105 +231,4 @@ fn receipt(operation: SandboxOperation, location: String) -> Result<Response, Ap
         HeaderValue::from_str(&location).map_err(|_| ApiFailure::unavailable())?,
     );
     Ok(response)
-}
-
-async fn no_store(mut response: Response) -> Response {
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
-}
-
-struct ApiFailure {
-    status: StatusCode,
-    code: &'static str,
-    message: &'static str,
-}
-
-impl ApiFailure {
-    fn unauthorized() -> Self {
-        Self {
-            status: StatusCode::UNAUTHORIZED,
-            code: "unauthorized",
-            message: "Authentication is required.",
-        }
-    }
-    fn forbidden() -> Self {
-        Self {
-            status: StatusCode::FORBIDDEN,
-            code: "forbidden",
-            message: "The operation is not permitted.",
-        }
-    }
-    fn not_found() -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: "The resource or operation was not found.",
-        }
-    }
-    fn conflict() -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code: "request_conflict",
-            message: "The request conflicts with its original content.",
-        }
-    }
-    fn unavailable() -> Self {
-        Self {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "unavailable",
-            message: "The service is not available.",
-        }
-    }
-}
-
-impl From<gesang_services::Error> for ApiFailure {
-    fn from(error: gesang_services::Error) -> Self {
-        match error {
-            gesang_services::Error::Unauthorized => Self::unauthorized(),
-            gesang_services::Error::Forbidden => Self::forbidden(),
-            gesang_services::Error::NotFound => Self::not_found(),
-            gesang_services::Error::Conflict => Self::conflict(),
-            gesang_services::Error::Platform(error) => error.into(),
-            gesang_services::Error::Invalid(_) => Self {
-                status: StatusCode::BAD_REQUEST,
-                code: "invalid_request",
-                message: "The request is invalid.",
-            },
-            _ => Self::unavailable(),
-        }
-    }
-}
-
-impl From<gesang_core::Error> for ApiFailure {
-    fn from(error: gesang_core::Error) -> Self {
-        match error {
-            gesang_core::Error::Forbidden => Self::forbidden(),
-            gesang_core::Error::NotFound => Self::not_found(),
-            gesang_core::Error::RequestConflict | gesang_core::Error::VersionConflict => {
-                Self::conflict()
-            }
-            _ => Self::unavailable(),
-        }
-    }
-}
-
-impl IntoResponse for ApiFailure {
-    fn into_response(self) -> Response {
-        let mut response = (
-            self.status,
-            Json(ApiProblem {
-                code: self.code.into(),
-                message: self.message.into(),
-            }),
-        )
-            .into_response();
-        if self.status == StatusCode::UNAUTHORIZED {
-            response
-                .headers_mut()
-                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        }
-        response
-    }
 }

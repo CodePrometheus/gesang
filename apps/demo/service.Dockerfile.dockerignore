@@ -1,0 +1,7 @@
+**
+!service.Dockerfile
+!package.json
+!package-lock.json
+!*.mjs
+!web/
+!web/**

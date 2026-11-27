@@ -1,0 +1,4 @@
+images:
+  - group: agents.x-k8s.io
+    kind: Sandbox
+    path: spec/podTemplate/spec/containers/image

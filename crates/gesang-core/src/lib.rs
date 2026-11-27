@@ -30,7 +30,7 @@ pub use custody::{
 };
 pub use error::{Error, Result};
 pub use host::*;
-pub use kernel::{Kernel, RuntimePolicy};
+pub use kernel::{Kernel, RecoveryLane, RuntimePolicy};
 pub use lifecycle::{
     CompletedMigration, InstanceIntent, InstancePhase, InstancePlan, InstancePurpose,
     InstanceRecord, PreparationProgress,
